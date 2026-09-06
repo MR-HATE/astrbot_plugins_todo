@@ -1,0 +1,92 @@
+{
+  "client_id": {
+    "description": "Entra 应用程序(客户端) ID",
+    "type": "string",
+    "default": "",
+    "hint": "在 Microsoft Entra 管理中心注册应用后获得的「应用程序(客户端) ID」。必填，否则无法绑定账号。注册时请启用「允许公共客户端流」并添加委派权限 Tasks.ReadWrite。"
+  },
+  "client_secret": {
+    "description": "Entra 客户端密码（可选）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "仅当应用注册为「机密客户端」时需要填写。留空即为公共客户端（设备码流程推荐用法）。"
+  },
+  "tenant": {
+    "description": "授权租户",
+    "type": "string",
+    "default": "common",
+    "options": [
+      "common",
+      "consumers",
+      "organizations"
+    ],
+    "hint": "common 同时支持个人账号与工作/学校账号；consumers 仅个人 Microsoft 账号；organizations 仅工作/学校账号。"
+  },
+  "scope": {
+    "description": "OAuth 权限范围",
+    "type": "string",
+    "default": "offline_access Tasks.ReadWrite User.Read",
+    "hint": "保持默认即可。offline_access 用于获取 refresh_token，Tasks.ReadWrite 是 Microsoft To Do 的最小权限。"
+  },
+  "timezone": {
+    "description": "默认时区",
+    "type": "string",
+    "default": "Asia/Shanghai",
+    "hint": "用于把「明天」「下周三」等相对时间解释为绝对日期。支持 IANA 名称（如 Asia/Shanghai）。"
+  },
+  "default_list": {
+    "description": "默认待办列表名",
+    "type": "string",
+    "default": "AstrBot 待办",
+    "hint": "当用户没有指定计划名时，导入到此列表；不存在会自动创建。"
+  },
+  "auto_create_list": {
+    "description": "按计划名自动创建列表",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，用户说「下个月搬家要办的事」会创建/复用名为「下个月搬家」的列表。关闭则统一进默认列表。"
+  },
+  "require_confirm": {
+    "description": "写入前需要确认",
+    "type": "bool",
+    "default": true,
+    "hint": "开启时：模型先整理出清单预览，等用户确认后才真正写入 Microsoft To Do。建议保持开启，避免误写。"
+  },
+  "max_tasks_per_import": {
+    "description": "单次导入任务数上限",
+    "type": "int",
+    "default": 20,
+    "hint": "超过上限会要求用户分批确认，防止一次写入过多。"
+  },
+  "reminder_enabled": {
+    "description": "启用定时提醒",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，会按用户指定的提醒时间调用 AstrBot 内置的定时任务（未来任务）创建提醒。"
+  },
+  "allow_any_user": {
+    "description": "允许所有用户绑定",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后只有白名单用户可以使用待办功能。"
+  },
+  "allowed_users": {
+    "description": "用户白名单",
+    "type": "list",
+    "default": [],
+    "hint": "填写用户 ID（发送者 ID）。仅在「允许所有用户绑定」关闭时生效。"
+  },
+  "request_timeout": {
+    "description": "HTTP 超时（秒）",
+    "type": "int",
+    "default": 30,
+    "hint": "访问 Microsoft 授权与 Graph 接口的超时时间。"
+  },
+  "proxy": {
+    "description": "HTTP 代理（可选）",
+    "type": "string",
+    "default": "",
+    "hint": "例如 http://127.0.0.1:7890。仅在企业网络需要代理访问 login.microsoftonline.com 时填写。"
+  }
+}
