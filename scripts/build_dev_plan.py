@@ -57,21 +57,21 @@ PLAN_ROWS: list[list[str]] = [
     ["M1 骨架与授权闭环", "1.7", "README 与 Entra 注册指引",
      "写清「只支持委派权限」「启用公共客户端流」「重定向 URI 留空」「21Vianet 不支持」等关键前提", "README.md", "-", "已完成", "2"],
     ["M1 骨架与授权闭环", "1.8", "真机验收",
-     "在本机 AstrBot 完成一次 /todo login → 手机端授权 → /todo lists 返回真实列表；重启 AstrBot 后凭据仍可用（验证 KV 持久化）", "验收记录（截图/日志）", "1.1-1.7", "待验收", "1"],
+     "在本机 AstrBot 完成一次 /todo login → 手机端授权 → /todo lists 返回真实列表；重启 AstrBot 后凭据仍可用（验证 KV 持久化）", "验收记录（截图/日志）", "1.1-1.7", "已完成", "1"],
 
     # ---------------- M2
     ["M2 导入链路（工具与预览确认）", "2.1", "数据模型与 JSON Schema",
-     "TaskDraft（title/due_date/due_time/importance/note/remind_at/steps/source_key）与 PlanDraft；在工具 parameters 中固化 Schema，约束模型输出", "graph/models.py", "M1", "待开始", "3"],
+     "TaskDraft（title/due_date/due_time/importance/note/remind_at/steps/source_key）与 PlanDraft；在工具 parameters 中固化 Schema，约束模型输出", "graph/models.py", "M1", "已完成", "3"],
     ["M2 导入链路（工具与预览确认）", "2.2", "归一化、校验、去重、预览渲染",
-     "相对时间→绝对日期（基准配置 timezone）；title 长度校验；source_key 去重；生成中文预览卡片（分组/日期/重要性/总数）", "graph/planner.py", "2.1", "待开始", "5"],
+     "相对时间→绝对日期（含 今天/明天/下周三/N天后/9月18日 兜底解析，基准配置 timezone）；标题/优先级/提醒校验；source_key 去重；中文预览卡片与结果回执", "graph/planner.py", "2.1", "已完成", "5"],
     ["M2 导入链路（工具与预览确认）", "2.3", "ms_todo_import_tasks（两阶段提交）",
-     "confirmed=false：暂存 plan 到 KV 并返回预览；confirmed=true：批量创建并回写结果与链接。require_confirm=false 时允许直接写入", "tools/todo_tools.py, graph/planner.py", "2.2", "待开始", "6"],
+     "confirmed=false：暂存 plan 到 KV 并返回预览；confirmed=true：批量创建（并发 3）并回写结果；require_confirm=false 时允许直接写入", "tools/todo_tools.py, main.py", "2.2", "已完成", "6"],
     ["M2 导入链路（工具与预览确认）", "2.4", "按计划名自动创建/复用列表",
-     "auto_create_list=true 时用计划名（或用户自定义标题）匹配已有列表，不存在则 POST /me/todo/lists 新建；一次导入只进一个列表", "graph/client.py", "2.2", "待开始", "3"],
+     "auto_create_list=true 时用计划名（或用户自定义标题）匹配已有列表，不存在则 POST /me/todo/lists 新建；关闭时回退默认列表；默认列表始终保证存在", "graph/client.py, main.py", "2.2", "已完成", "3"],
     ["M2 导入链路（工具与预览确认）", "2.5", "指令兜底通道",
-     "/todo import <自然语言> 走 context.llm_generate 抽取结构化任务（复用同一 Schema 与校验）；/todo confirm、/todo cancel 完成二次确认", "main.py", "2.3", "待开始", "5"],
+     "/todo import <自然语言> 走 context.llm_generate 抽取结构化任务（复用同一 Schema 与校验）；/todo confirm、/todo cancel 完成二次确认", "main.py", "2.3", "已完成", "5"],
     ["M2 导入链路（工具与预览确认）", "2.6", "端到端验收",
-     "一句话 → 预览 → 确认 → Microsoft To Do App 出现任务；日期/重要性/子步骤正确；重复导入不产生重复任务", "验收记录", "2.1-2.5", "待开始", "2"],
+     "一句话 → 预览 → 确认 → Microsoft To Do App 出现任务；日期/重要性/子步骤正确；重复导入不产生重复任务（已用假 Graph 客户端跑通全链路，待真机验收）", "验收记录", "2.1-2.5", "待验收", "2"],
 
     # ---------------- M3
     ["M3 Skill（Agent 操作手册）", "3.1", "编写 SKILL.md",
@@ -167,8 +167,8 @@ RISK_ROWS = [
 
 MILESTONE_HEADERS = ["里程碑", "名称", "目标", "状态", "预估合计(人时)"]
 MILESTONE_ROWS = [
-    ["M1", "骨架与授权闭环", "每个用户能各自完成绑定，凭据可持久化并自动续期", "已完成（待真机验收）", ""],
-    ["M2", "导入链路", "自然语言 → 预览 → 确认 → 写入指定列表", "待开始", ""],
+    ["M1", "骨架与授权闭环", "每个用户能各自完成绑定，凭据可持久化并自动续期", "已完成（已验收）", ""],
+    ["M2", "导入链路", "自然语言 → 预览 → 确认 → 写入指定列表", "已完成（待真机验收）", ""],
     ["M3", "Skill", "Agent 按操作手册稳定完成抽取与确认流程", "待开始", ""],
     ["M4", "查询、管理与 WebUI", "增删改查 + WebUI 绑定管理页 + 批量与幂等", "待开始", ""],
     ["M5", "定时提醒", "复用 AstrBot 内置定时任务创建提醒", "待开始", ""],

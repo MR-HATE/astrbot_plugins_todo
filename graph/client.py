@@ -160,10 +160,64 @@ class GraphClient:
         data = await self.get(aid, "/me?$select=userPrincipalName,displayName,mail")
         return data if isinstance(data, dict) else {}
 
+    # ------------------------------------------------------------------ 列表
+
     async def list_task_lists(self, aid: str) -> list[dict]:
-        """连通性自检 + 后续导入时选择目标列表都要用。"""
-        data = await self.get(aid, "/me/todo/lists?$top=100")
-        if not isinstance(data, dict):
-            return []
-        value = data.get("value")
-        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+        """列出用户的全部待办列表（自动跟分页，最多 5 页）。"""
+        items: list[dict] = []
+        path: str | None = "/me/todo/lists?$top=100"
+        for _ in range(5):
+            if not path:
+                break
+            data = await self.get(aid, path)
+            if not isinstance(data, dict):
+                break
+            value = data.get("value")
+            if isinstance(value, list):
+                items.extend(item for item in value if isinstance(item, dict))
+            next_link = data.get("@odata.nextLink")
+            path = str(next_link) if next_link else None
+        return items
+
+    async def find_task_list(self, aid: str, name: str) -> dict | None:
+        """按名称查找列表（忽略大小写与首尾空白）。"""
+        wanted = (name or "").strip().casefold()
+        if not wanted:
+            return None
+        for item in await self.list_task_lists(aid):
+            display = str(item.get("displayName") or "").strip()
+            if display.casefold() == wanted:
+                return item
+        return None
+
+    async def create_task_list(self, aid: str, name: str) -> dict:
+        data = await self.post(aid, "/me/todo/lists", json={"displayName": name})
+        return data if isinstance(data, dict) else {}
+
+    async def ensure_task_list(self, aid: str, name: str, *, create: bool = True) -> dict | None:
+        """找到或创建目标列表。
+
+        ``create=False`` 时找不到就返回 None，由上层回退到默认列表。
+        """
+        existing = await self.find_task_list(aid, name)
+        if existing:
+            return existing
+        if not create:
+            return None
+        return await self.create_task_list(aid, name)
+
+    # ------------------------------------------------------------------ 任务
+
+    async def create_task(self, aid: str, list_id: str, payload: dict) -> dict:
+        data = await self.post(aid, f"/me/todo/lists/{list_id}/tasks", json=payload)
+        return data if isinstance(data, dict) else {}
+
+    async def add_checklist_item(
+        self, aid: str, list_id: str, task_id: str, display_name: str
+    ) -> dict:
+        data = await self.post(
+            aid,
+            f"/me/todo/lists/{list_id}/tasks/{task_id}/checklistItems",
+            json={"displayName": display_name},
+        )
+        return data if isinstance(data, dict) else {}
