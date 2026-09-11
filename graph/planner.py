@@ -58,6 +58,23 @@ _SIMPLE_OFFSETS = {
 
 # ---------------------------------------------------------------- 时区
 
+def _try_iso_datetime(text: str) -> datetime | None:
+    """尽力把字符串解析成 datetime（支持 ``Z`` 后缀；3.10 不认 ``Z``，手动替换）。"""
+    candidate = str(text).strip()
+    if not candidate:
+        return None
+    if candidate.endswith(("Z", "z")):
+        candidate = candidate[:-1] + "+00:00"
+    # 把 "2026-09-15 20:00" 这种空格分隔也交给 fromisoformat
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(candidate.replace(" ", "T", 1))
+        except ValueError:
+            return None
+
+
 def get_tz(tz_name: str | None) -> ZoneInfo:
     """取时区，非法名称回退到系统本地时区。"""
     try:
@@ -180,9 +197,33 @@ def resolve_time(raw: str | None) -> tuple[str | None, str | None]:
     return f"{hh:02d}:{mm:02d}", None
 
 
-def parse_due(raw_date: str | None, raw_time: str | None, today: date) -> tuple[str | None, str | None, list[str]]:
-    """综合解析截止时间，返回 (date, time, warnings)。"""
+def parse_due(
+    raw_date: str | None,
+    raw_time: str | None,
+    today: date,
+    tz_name: str | None = None,
+) -> tuple[str | None, str | None, list[str]]:
+    """综合解析截止时间，返回 (date, time, warnings)。
+
+    ``raw_date`` 里如果内嵌了时刻（甚至带时区偏移，如 ``2026-09-18T09:00:00+08:00``），
+    会先换算到配置时区，再拆成 date + time。
+    """
     warnings: list[str] = []
+
+    text = str(raw_date).strip() if raw_date is not None else ""
+    if text and re.match(r"^\d{4}-\d{1,2}-\d{1,2}[ T]", text):
+        iso = _try_iso_datetime(text)
+        if iso is not None:
+            if iso.tzinfo is not None and tz_name:
+                aware_local = iso.astimezone(get_tz(tz_name))
+                local = aware_local.replace(tzinfo=None)
+                if iso.utcoffset() != aware_local.utcoffset():
+                    warnings.append("截止时间带时区，已按配置时区换算")
+            else:
+                local = iso.replace(tzinfo=None)
+            has_clock = bool(re.search(r"\d{1,2}:\d{2}", text))
+            return local.date().isoformat(), (local.strftime("%H:%M") if has_clock else None), warnings
+
     due_date, warn = resolve_date(raw_date, today)
     if warn:
         warnings.append(warn)
@@ -235,7 +276,9 @@ def normalize_tasks(raw_tasks, tz_name: str, *, now: datetime | None = None) -> 
         if len(clean_text(item.get("title"), 10_000)) > TITLE_MAX:
             warnings.append("标题过长已截断")
 
-        due_date, due_time, due_warnings = parse_due(item.get("due_date"), item.get("due_time"), today)
+        due_date, due_time, due_warnings = parse_due(
+            item.get("due_date"), item.get("due_time"), today, tz_name
+        )
         warnings.extend(due_warnings)
         if due_time and not due_date:
             warnings.append("只有时刻没有日期，已忽略该时刻")
@@ -283,34 +326,73 @@ def normalize_tasks(raw_tasks, tz_name: str, *, now: datetime | None = None) -> 
 
 
 def parse_remind(raw: object, tz_name: str, now: datetime | None = None) -> tuple[str | None, str | None]:
-    """解析提醒时间，返回 (``YYYY-MM-DDTHH:MM``, 警告)。"""
+    """解析提醒时间，返回 (``YYYY-MM-DDTHH:MM`` 本地时间, 警告)。
+
+    兼容三种输入：
+    - **带时区偏移**的 ISO 串（``2026-09-15T20:00:00+08:00``、``...Z``）→ 换算到配置时区；
+    - 本地 ISO 串 / 中文写法（``2026-09-15T20:00``、``9月18日 20:00``）；
+    - 只给日期或相对说法（``明天``）→ 默认当天 09:00；只给时刻（``晚上8点``）→ 今天该时刻，过了就顺延明天。
+
+    注意：内部一律用**带时区**的时间做比较，否则 naive 与 aware 相减会抛 TypeError。
+    """
+    # 模型有时会照抄 Graph 的 dateTimeTimeZone 结构
+    if isinstance(raw, dict):
+        raw = raw.get("dateTime") or raw.get("date_time") or raw.get("datetime")
     if raw is None or str(raw).strip() == "":
         return None, None
-    text = str(raw).strip().replace("T", " ")
+
+    tz = get_tz(tz_name)
     current = now or local_now(tz_name)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=tz)
+    current = current.astimezone(tz)
+    current_naive = current.replace(tzinfo=None)
 
-    m = re.match(r"^(\d{4}-\d{1,2}-\d{1,2})[ T](\d{1,2}:\d{2})", text)
-    if m:
-        day, _warn = resolve_date(m.group(1), current.date())
-        clock, _twarn = resolve_time(m.group(2))
-        if not day or not clock:
-            return None, f"提醒时间「{raw}」无法识别，已忽略提醒"
-    else:
-        # 只给了日期或相对说法：默认当天 09:00
-        day, _t, _w = parse_due(text, None, current.date())
-        if not day:
-            return None, f"无法识别提醒时间「{raw}」，已忽略提醒"
-        clock = "09:00"
+    text = str(raw).strip()
+    has_clock = bool(re.search(r"\d{1,2}:\d{2}", text))
 
-    try:
-        moment = datetime.fromisoformat(f"{day}T{clock}")
-    except ValueError:
-        return None, f"提醒时间「{raw}」无效，已忽略提醒"
-    if moment < current:
+    # A) 能按 ISO 解析（含带偏移量的情况）
+    iso = _try_iso_datetime(text)
+    if iso is not None and re.match(r"^\d{4}-\d{1,2}-\d{1,2}", text):
+        if iso.tzinfo is None:
+            moment, note = iso, None
+        else:
+            aware_local = iso.astimezone(tz)
+            moment = aware_local.replace(tzinfo=None)
+            note = (
+                "提醒时间带时区，已按配置时区换算"
+                if iso.utcoffset() != aware_local.utcoffset()
+                else None
+            )
+        if not has_clock:
+            moment = moment.replace(hour=9, minute=0, second=0, microsecond=0)
+            return _finish_remind(moment, current_naive, "提醒未指定具体时刻，已按 09:00 处理")
+        return _finish_remind(moment, current_naive, note)
+
+    # B) 相对说法 / 中文日期
+    day, _time, _warn = parse_due(text, None, current.date(), tz_name)
+    if day:
+        return _finish_remind(
+            datetime.fromisoformat(f"{day}T09:00"), current_naive, "提醒未指定具体时刻，已按 09:00 处理"
+        )
+
+    # C) 只给了时刻（例如「晚上8点」）
+    clock, _warn_t = resolve_time(text)
+    if clock:
+        moment = datetime.fromisoformat(f"{current_naive.date().isoformat()}T{clock}")
+        if moment < current_naive:
+            return _finish_remind(moment + timedelta(days=1), current_naive, "只给了时刻且今天已过，已顺延到明天")
+        return _finish_remind(moment, current_naive, "只给了时刻，按今天处理")
+
+    return None, f"无法识别提醒时间「{raw}」，已忽略提醒"
+
+
+def _finish_remind(
+    moment: datetime, current_naive: datetime, note: str | None
+) -> tuple[str | None, str | None]:
+    if moment < current_naive:
         return None, "提醒时间已过去，已忽略提醒"
-    if not m:
-        return f"{day}T{clock}", f"提醒未指定具体时刻，已按 {clock} 处理"
-    return f"{day}T{clock}", None
+    return moment.strftime("%Y-%m-%dT%H:%M"), note
 
 
 # ---------------------------------------------------------------- 去重
