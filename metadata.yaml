@@ -8,9 +8,5 @@ repo: https://github.com/MR-HATE/astrbot_plugins_todo # 插件的仓库地址
 support_platforms: # 声明支持的平台适配器（主动推送提醒依赖平台的主动消息能力）
   - aiocqhttp
   - telegram
-  - discord
-  - slack
-  - lark
-  - misskey
-  - satori
+
 astrbot_version: ">=4.17.0" # 插件所需的最低 astrbot 版本（PEP 440 格式，不要加 v 前缀）
