@@ -113,6 +113,29 @@ Microsoft To Do 的 Graph API **只支持委派权限**，因此必须注册一�
 | `/todo confirm` | `ms_todo_confirm_import` | 确认并写入预览里的清单 |
 | `/todo cancel` | `ms_todo_confirm_import` | 放弃预览（`action=cancel`） |
 
+## Skill：让模型更守规矩（可选增强）
+
+插件内置了一个 Skill：**`ms-todo-import`**（见 `skills/ms-todo-import/`）。
+加载插件后它会自动出现在 WebUI 的 **Skills** 页面，来源显示为插件、**只读**（可启用/停用，
+不能在本机 Skills 页编辑或删除）。
+
+它给模型一份操作手册，管的是**工具描述管不了的事**：
+
+- 什么时候该触发、什么时候该先追问而不是硬猜；
+- 拆分粒度（一件事 = 一个任务，子步骤用 `steps`，别把一个动作拆成十个任务）；
+- 时间换算规则与"没有时间就不要编日期"；
+- **必须先出预览、等用户确认再写入**；
+- 预览里出现「⚠️ 需要留意」时必须转达用户；
+- 目标列表的选择优先级、异常话术、反例清单。
+
+> ⚠️ **前置条件**：AstrBot 的 Skill 机制里，系统提示词只内联每个 Skill 的 **name + description**，
+> 正文 `SKILL.md` 需要 Agent 用 shell 命令读取。因此要在 WebUI
+> **配置 → 使用电脑能力** 里把运行环境设为 `Local` 或 `Sandbox`，Skill 才会真正生效。
+> Local 模式下只有 AstrBot **管理员**能执行命令，普通群友只能看到描述——
+> 但这**不影响功能本身**：待办导入完全由工具实现，不依赖 Skill。
+
+所以：Skill 是"让模型表现更好"的增强项，工具是"功能可用"的必需项。
+
 ## 配置项
 
 见 AstrBot WebUI 插件配置页（`_conf_schema.json` 内每项都带说明）。常用的：

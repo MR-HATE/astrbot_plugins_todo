@@ -44,7 +44,22 @@ _RE_ISO = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})")
 _RE_MD = re.compile(r"^(\d{1,2})[月/\-](\d{1,2})[日号]?$")
 _RE_N_DAYS = re.compile(r"^(\d{1,3})\s*天\s*(?:后|之后|以后)$")
 _RE_WEEK = re.compile(r"^(下|下个|下一|本|这|这个)?\s*(?:周|星期|礼拜)\s*([一二三四五六日天0-7])$")
-_RE_TIME = re.compile(r"^(\d{1,2})\s*[:：点时]\s*(\d{1,2})?")
+_RE_CLOCK_ARABIC = re.compile(r"^(\d{1,2})\s*[:：点时]\s*(\d{1,2})?")
+_RE_CLOCK_CN = re.compile(r"^([零〇一二两三四五六七八九十]+)\s*[点时]")
+#: 结尾处的时刻，用于把「9月18日 20:00」「明天 晚上8点」拆开
+_RE_TRAILING_TIME = re.compile(
+    r"(?:上午|早上|早晨|凌晨|中午|下午|傍晚|晚上|夜里|晚)?\s*"
+    r"(?:\d{1,2}\s*[:：]\s*\d{2}"
+    r"|\d{1,2}\s*[点时](?:\d{1,2}|半|一刻|三刻|[零〇一二两三四五六七八九十]+分?)?"
+    r"|[零〇一二两三四五六七八九十]+\s*[点时](?:半|一刻|三刻|[零〇一二两三四五六七八九十]+分?)?"
+    r")\s*$"
+)
+
+#: 汉字数字（「十」不在此表内，由 _cn_number 单独处理）
+_CN_DIGITS = {
+    "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
 _RE_DATE_TIME = re.compile(r"^(\d{4}-\d{1,2}-\d{1,2})[ T](\d{1,2}:\d{2})")
 
 _SIMPLE_OFFSETS = {
@@ -156,8 +171,49 @@ def resolve_date(raw: str | None, today: date) -> tuple[str | None, str | None]:
     return None, f"无法识别日期「{text}」，已忽略该项的截止时间"
 
 
+def _cn_number(text: str) -> int | None:
+    """汉字数字 → int（支持 0-99：``三`` / ``十`` / ``十一`` / ``二十三``）。"""
+    value = (text or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return int(value)
+    if "十" in value:
+        left, _, right = value.partition("十")
+        tens = _CN_DIGITS.get(left) if left else 1
+        units = _CN_DIGITS.get(right) if right else 0
+        if tens is None or units is None:
+            return None
+        return tens * 10 + units
+    return _CN_DIGITS.get(value)
+
+
+def _minute_word(rest: str) -> int | None:
+    """解析「点」之后的分钟说法：``半`` / ``一刻`` / ``三刻`` / ``30`` / ``三十``。"""
+    text = (rest or "").strip()
+    if not text:
+        return None
+    if text.startswith("半"):
+        return 30
+    m = re.match(r"^([一二两三四])?\s*刻", text)
+    if m:
+        count = _cn_number(m.group(1)) if m.group(1) else 1
+        return {1: 15, 2: 30, 3: 45}.get(count or 0)
+    m = re.match(r"^(\d{1,2})\s*分?", text)
+    if m:
+        return int(m.group(1))
+    m = re.match(r"^([零〇一二两三四五六七八九十]+)\s*分?", text)
+    if m:
+        return _cn_number(m.group(1))
+    return None
+
+
 def resolve_time(raw: str | None) -> tuple[str | None, str | None]:
-    """把 ``9:00`` / ``9点`` / ``9点半`` / ``下午3点`` 之类解析成 ``HH:MM``。"""
+    """把时刻说法解析成 ``HH:MM``。
+
+    支持：``9:00``、``9点``、``9点30``、``9点半``、``9点一刻``、``9点三刻``、
+    ``下午3点``、``晚上8点``，以及汉字数字 ``九点``、``九点半``、``下午三点``、``十二点``。
+    """
     if raw is None:
         return None, None
     text = str(raw).strip()
@@ -172,18 +228,34 @@ def resolve_time(raw: str | None) -> tuple[str | None, str | None]:
             text = text[len(prefix):].strip()
             break
 
-    # 已经是 HH:MM
-    m = re.match(r"^(\d{1,2}):(\d{2})$", text)
+    hh: int | None = None
+    mm: int | None = None
+
+    m = _RE_CLOCK_ARABIC.match(text)
     if m:
-        hh, mm = int(m.group(1)), int(m.group(2))
-    else:
-        m = _RE_TIME.match(text)
-        if not m:
-            return None, f"无法识别时间「{raw}」，已忽略具体时刻"
+        # 9:30 / 9点30 / 9点
         hh = int(m.group(1))
-        mm = int(m.group(2)) if m.group(2) else 0
-        if "半" in text:
-            mm = 30
+        mm = int(m.group(2)) if m.group(2) else _minute_word(text[m.end():])
+    else:
+        m = _RE_CLOCK_CN.match(text)
+        if m:
+            # 九点 / 九点半 / 下午三点一刻
+            hh = _cn_number(m.group(1))
+            mm = _minute_word(text[m.end():])
+        else:
+            m = re.match(
+                r"^([零〇一二两三四五六七八九十]+)\s*[:：]\s*([零〇一二两三四五六七八九十]+)$",
+                text,
+            )
+            if m:
+                # 九:三十
+                hh = _cn_number(m.group(1))
+                mm = _cn_number(m.group(2))
+
+    if hh is None:
+        return None, f"无法识别时间「{raw}」，已忽略具体时刻"
+    if mm is None:
+        mm = 0
 
     if meridiem in ("下午", "傍晚", "晚上", "夜里", "晚") and hh < 12:
         hh += 12
@@ -195,6 +267,26 @@ def resolve_time(raw: str | None) -> tuple[str | None, str | None]:
     if not (0 <= hh <= 23 and 0 <= mm <= 59):
         return None, f"时间「{raw}」超出范围，已忽略具体时刻"
     return f"{hh:02d}:{mm:02d}", None
+
+
+def split_date_time(text: str) -> tuple[str, str | None]:
+    """把「9月18日 20:00」「明天 晚上8点」拆成 (日期部分, 时刻部分)。
+
+    只剥离**结尾**的时刻，拆不出来时原样返回 ``(text, None)``，
+    避免把日期里本身的数字误当成时刻。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return "", None
+    match = _RE_TRAILING_TIME.search(raw)
+    if not match:
+        return raw, None
+    time_part = match.group(0).strip()
+    date_part = raw[: match.start()].strip(" ，,、;；:：")
+    if not date_part:
+        # 整串就是一个时刻（例如「晚上8点」），交给只解析时刻的分支
+        return raw, None
+    return date_part, time_part
 
 
 def parse_due(
@@ -223,6 +315,12 @@ def parse_due(
                 local = iso.replace(tzinfo=None)
             has_clock = bool(re.search(r"\d{1,2}:\d{2}", text))
             return local.date().isoformat(), (local.strftime("%H:%M") if has_clock else None), warnings
+
+    # 中文日期与时刻混在一起的情况（「9月18日 20:00」「明天 晚上8点」）
+    if text and (raw_time is None or str(raw_time).strip() == ""):
+        date_part, time_part = split_date_time(text)
+        if time_part and resolve_date(date_part, today)[0]:
+            raw_date, raw_time = date_part, time_part
 
     due_date, warn = resolve_date(raw_date, today)
     if warn:
@@ -299,7 +397,9 @@ def normalize_tasks(raw_tasks, tz_name: str, *, now: datetime | None = None) -> 
             steps = steps[:STEP_COUNT_MAX]
             warnings.append(f"子步骤超过 {STEP_COUNT_MAX} 条，已截断")
 
-        remind_at, remind_warning = parse_remind(item.get("remind_at"), tz_name, now)
+        remind_at, remind_warning = parse_remind(
+            item.get("remind_at"), tz_name, now, fallback_date=due_date
+        )
         if remind_warning:
             warnings.append(remind_warning)
 
@@ -325,13 +425,22 @@ def normalize_tasks(raw_tasks, tz_name: str, *, now: datetime | None = None) -> 
     return drafts
 
 
-def parse_remind(raw: object, tz_name: str, now: datetime | None = None) -> tuple[str | None, str | None]:
+def parse_remind(
+    raw: object,
+    tz_name: str,
+    now: datetime | None = None,
+    *,
+    fallback_date: str | None = None,
+) -> tuple[str | None, str | None]:
     """解析提醒时间，返回 (``YYYY-MM-DDTHH:MM`` 本地时间, 警告)。
 
     兼容三种输入：
     - **带时区偏移**的 ISO 串（``2026-09-15T20:00:00+08:00``、``...Z``）→ 换算到配置时区；
-    - 本地 ISO 串 / 中文写法（``2026-09-15T20:00``、``9月18日 20:00``）；
-    - 只给日期或相对说法（``明天``）→ 默认当天 09:00；只给时刻（``晚上8点``）→ 今天该时刻，过了就顺延明天。
+    - 本地 ISO 串 / 中文写法（``2026-09-15T20:00``、``9月18日 20:00``、``下午三点``）；
+    - 只给日期或相对说法（``明天``）→ 默认当天 09:00。
+
+    只给时刻（``下午三点``）时，优先落在 ``fallback_date``（通常是该待办的截止日期）当天，
+    没有截止日期才按今天算、已过则顺延明天。
 
     注意：内部一律用**带时区**的时间做比较，否则 naive 与 aware 相减会抛 TypeError。
     """
@@ -369,19 +478,32 @@ def parse_remind(raw: object, tz_name: str, now: datetime | None = None) -> tupl
             return _finish_remind(moment, current_naive, "提醒未指定具体时刻，已按 09:00 处理")
         return _finish_remind(moment, current_naive, note)
 
-    # B) 相对说法 / 中文日期
-    day, _time, _warn = parse_due(text, None, current.date(), tz_name)
+    # B) 相对说法 / 中文日期（可能带空格分隔的时刻：「9月18日 20:00」「明天 晚上8点」）
+    day = None
+    clock_from_split = None
+    date_part, time_part = split_date_time(text)
+    if time_part:
+        day, _w = resolve_date(date_part, current.date())
+        if day:
+            clock_from_split, _tw = resolve_time(time_part)
+    if day is None:
+        day, _time, _warn = parse_due(text, None, current.date(), tz_name)
     if day:
-        return _finish_remind(
-            datetime.fromisoformat(f"{day}T09:00"), current_naive, "提醒未指定具体时刻，已按 09:00 处理"
-        )
+        clock = clock_from_split or "09:00"
+        note = None if clock_from_split else "提醒未指定具体时刻，已按 09:00 处理"
+        return _finish_remind(datetime.fromisoformat(f"{day}T{clock}"), current_naive, note)
 
-    # C) 只给了时刻（例如「晚上8点」）
+    # C) 只给了时刻（例如「晚上8点」「下午三点」）
     clock, _warn_t = resolve_time(text)
     if clock:
+        if fallback_date:
+            moment = datetime.fromisoformat(f"{fallback_date}T{clock}")
+            return _finish_remind(moment, current_naive, None)
         moment = datetime.fromisoformat(f"{current_naive.date().isoformat()}T{clock}")
         if moment < current_naive:
-            return _finish_remind(moment + timedelta(days=1), current_naive, "只给了时刻且今天已过，已顺延到明天")
+            return _finish_remind(
+                moment + timedelta(days=1), current_naive, "只给了时刻且今天已过，已顺延到明天"
+            )
         return _finish_remind(moment, current_naive, "只给了时刻，按今天处理")
 
     return None, f"无法识别提醒时间「{raw}」，已忽略提醒"
