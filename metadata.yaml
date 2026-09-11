@@ -2,7 +2,7 @@ name: astrbot_plugin_todo # 插件唯一识别名（AstrBot 用它作为插件�
 display_name: 待办事项 # 展示名，可填中文
 desc: 让 AI 把「接下来要办的事」整理成待办清单，并导入 Microsoft To Do 的指定列表。 # 插件简短描述
 short_desc: 自然语言 → Microsoft To Do 待办清单 # 插件市场卡片上的短描述
-version: v0.1.0 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v1.0.0-dev3.1 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: Mr_Hate # 作者
 repo: https://github.com/MR-HATE/astrbot_plugins_todo # 插件的仓库地址
 support_platforms: # 声明支持的平台适配器（主动推送提醒依赖平台的主动消息能力）

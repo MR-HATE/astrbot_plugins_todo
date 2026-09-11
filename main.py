@@ -22,6 +22,7 @@ import httpx
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.message_event_result import MessageChain
 
@@ -51,6 +52,30 @@ USER_AGENT = "astrbot-plugin-todo/0.1.0"
 _IMPORT_CONCURRENCY = 3
 #: 幂等记录保留条数上限（按列表维度）
 _SEEN_MAX = 500
+
+#: 注入标记：同一次请求的工具循环会复用同一个 ProviderRequest，用它保证只追加一次
+_RULES_MARKER = "<!-- astrbot-plugin-todo:rules -->"
+
+#: 追加到 system prompt 的待办规则（内容固定，不影响提示词缓存）。
+#:
+#: 为什么需要它？AstrBot 的 Skills 机制只在提示词里内联 name + description，
+#: SKILL.md 正文要 Agent 自己用 shell 读取——没开「使用电脑能力」或普通用户执行命令被拒时
+#: 就读不到。这里把最关键的几条规则兜底注入，保证任何环境都生效。
+_TODO_RULES_PROMPT = f"""{_RULES_MARKER}
+# Microsoft To Do 待办（astrbot_plugin_todo）
+
+当用户要把事情记成待办、或提到待办清单时，使用 `ms_todo_*` 工具，并遵守：
+
+1. **先预览、后写入**：调用 `ms_todo_import_tasks` 时 `confirmed` 一律留空，把返回的预览
+   原样发给用户；用户确认后再调用 `ms_todo_confirm_import(action="confirm")` 写入。
+   没有用户确认就不要写。
+2. **不编造日期**：没有明确时间就不填 `due_date`；「月底」「下个月」这类无法确定具体日期的
+   说法留空，并向用户说明。
+3. **拆分粒度**：一件能独立完成的事 = 一个任务；同一件事的多个步骤放进 `steps`，
+   不要把一个动作拆成多个任务。
+4. **别误触发**：闲聊、普通提问不要建任务；用户意图不明时先追问，不要臆造待办。
+5. **如实回报**：预览里的「⚠️ 需要留意」必须转达用户；工具报错就说失败，不要假装成功。
+6. 当前版本只支持**导入**与**查看列表**；查询待办条目、修改、完成、删除尚未提供。"""
 
 _EXTRACT_SYSTEM_PROMPT = """你是一个待办抽取器。把用户的话拆成结构化的待办事项。
 
@@ -578,6 +603,22 @@ class TodoPlugin(Star):
             await self.context.send_message(session, MessageChain().message(text))
         except Exception as exc:  # noqa: BLE001 - 通知失败不影响授权结果
             logger.warning("发送绑定成功通知失败: %s", exc)
+
+    # ------------------------------------------------------------ LLM 钩子
+
+    @filter.on_llm_request()
+    async def inject_todo_rules(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        """把待办规则追加到 system prompt。
+
+        钩子里不能 yield，也不建议追加每轮变化的内容（会破坏服务端提示词缓存）；
+        这里注入的是固定文本，且用标记保证同一次请求只追加一次。
+        """
+        if not bool(self._cfg("inject_rules", True)):
+            return
+        current = getattr(req, "system_prompt", "") or ""
+        if _RULES_MARKER in current:
+            return
+        req.system_prompt = f"{current}\n{_TODO_RULES_PROMPT}\n" if current else _TODO_RULES_PROMPT
 
     # ------------------------------------------------------------ 指令
 
