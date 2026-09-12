@@ -832,7 +832,7 @@ class TodoPlugin(Star):
                     await self._cancel_reminders_of_list(aid, list_id)
             await self.delete_kv_data(self._pending_delete_key(aid))
             lines = (
-                [f"🗑 已删除列表：" + "、".join(f"「{name}」" for name in deleted)]
+                ["🗑 已删除列表：" + "、".join(f"「{name}」" for name in deleted)]
                 if deleted
                 else ["没有删除任何列表。"]
             )

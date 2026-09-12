@@ -63,7 +63,6 @@ def main(argv: list[str]) -> int:
     for path in files:
         module = _load_module(path)
         names = sorted(name for name in dir(module) if name.startswith("test_"))
-        current = None
         if not names:
             continue
         print(f"\n── {path.name} ──")
