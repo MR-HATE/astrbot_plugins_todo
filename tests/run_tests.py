@@ -17,8 +17,24 @@ import sys
 import traceback
 
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
+REPO_ROOT = TESTS_DIR.parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
+# 让 `astrbot_plugins_todo` 成为可导入的包（与 conftest.py 里的处理保持一致），
+# 这样用例里可以写 `from astrbot_plugins_todo.graph.auth import ...`。
+if str(REPO_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT.parent))
+
+
+def _force_utf8_stdio() -> None:
+    """Windows 控制台默认 GBK，输出 ✓/✗ 会直接 UnicodeEncodeError，这里兜一下。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
 
 
 def _load_module(path: pathlib.Path):
@@ -30,6 +46,7 @@ def _load_module(path: pathlib.Path):
 
 
 def main(argv: list[str]) -> int:
+    _force_utf8_stdio()
     filters = [item for item in argv[1:] if not item.startswith("-")]
     files = sorted(
         path

@@ -1,4 +1,8 @@
-"""M1 阶段提供的工具：账号绑定与连通性自检。
+"""LLM 工具的 Schema 定义。
+
+每个 ``Todo*Tool`` 是一个 ``FunctionTool`` 子类：只负责声明 ``name`` / ``description`` /
+``parameters`` 并把调用转发给插件实例（``self.plugin.tool_*``），
+业务逻辑统一放在 ``main.py``，保证指令与工具行为一致。
 
 命名统一加 ``ms_todo_`` 前缀，避免与 AstrBot 内置工具（如 proactive agent 的
 ``future_task``）或其它插件的工具重名。

@@ -1,12 +1,14 @@
 """AstrBot 插件：待办事项（Microsoft To Do 同步）。
 
-已完成的能力：
-- OAuth 2.0 设备码授权（Device Code Flow），**每个用户各自绑定**，凭据按用户隔离；
-- 聊天内指令：``/todo login|status|logout|lists|import|confirm|cancel``；
-- 配套 LLM 工具（函数调用），让模型可以主动引导用户绑定并导入待办；
-- 自然语言 → 结构化待办 → **预览确认** → 按计划名建列表 → 写入 Microsoft To Do。
+入口模块，职责有三块：
 
-后续阶段（见仓库根目录开发计划）会补齐 Skill 说明书与 AstrBot 定时提醒。
+- **生命周期**：注册 LLM 工具、初始化 OAuth 客户端、卸载时释放连接；
+- **业务逻辑**：授权绑定、待办查询、增删改、两阶段导入、定时提醒
+  （``/todo`` 指令与 LLM 工具共用同一套实现）；
+- **提示词兜底**：``on_llm_request`` 钩子把关键待办规则追加到 system prompt。
+
+配套模块：``graph/`` 是 Microsoft Graph 接入层；``tools/`` 是 LLM 工具的 Schema 定义；
+``skills/ms-todo-import/`` 是给 Agent 看的 Skill 说明书。
 """
 
 from __future__ import annotations
@@ -59,7 +61,12 @@ from .graph.planner import (
 from .tools import TOOL_CLASSES
 
 PLUGIN_NAME = "astrbot_plugin_todo"
-USER_AGENT = "astrbot-plugin-todo/0.1.0"
+
+#: 插件版本，与 metadata.yaml 的 version 保持一致（发版时两处一起改）。
+PLUGIN_VERSION = "v1.0.0"
+
+#: 出网请求的 User-Agent，便于 Microsoft 侧排查来源。
+USER_AGENT = f"astrbot-plugin-todo/{PLUGIN_VERSION.lstrip('v')}"
 
 #: 支持"机器人主动推送消息"的平台；与 metadata.yaml 的 support_platforms 保持一致。
 #: 其它平台仍会写入 To Do，只是无法由机器人在到点时主动发消息。
@@ -187,7 +194,7 @@ def _build_http_client(config: dict) -> httpx.AsyncClient:
     PLUGIN_NAME,
     "Mr_Hate",
     "把「接下来要办的事」整理成待办清单，并导入 Microsoft To Do。",
-    "v0.1.0",
+    PLUGIN_VERSION,
 )
 class TodoPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
