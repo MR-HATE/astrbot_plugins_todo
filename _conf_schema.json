@@ -59,6 +59,12 @@
     "default": 20,
     "hint": "超过上限会要求用户分批确认，防止一次写入过多。"
   },
+  "inject_rules": {
+    "description": "向模型注入待办规则",
+    "type": "bool",
+    "default": true,
+    "hint": "把「先预览后写入、不编造日期、拆分粒度、别误触发」等规则追加到 system prompt。用于兜底：插件内置 Skill 的正文需要 Agent 用 shell 读取，未启用「使用电脑能力」或普通用户被拒绝执行命令时读不到。注入内容是固定文本，不影响提示词缓存。"
+  },
   "reminder_enabled": {
     "description": "启用定时提醒",
     "type": "bool",
