@@ -20,10 +20,13 @@ TESTS_DIR = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
-# 让 `astrbot_plugins_todo` 成为可导入的包（与 conftest.py 里的处理保持一致），
-# 这样用例里可以写 `from astrbot_plugins_todo.graph.auth import ...`。
 if str(REPO_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT.parent))
+
+# 必须先导入 conftest：它会把插件目录挂成统一别名 `plugin_pkg`，
+# 用例里都写 `from plugin_pkg... import ...`。少了这一句，
+# 不 import conftest 的用例（如 test_auth.py）会直接 ModuleNotFoundError。
+import conftest  # noqa: E402,F401  (仅为触发路径与别名初始化)
 
 
 def _force_utf8_stdio() -> None:

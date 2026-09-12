@@ -63,7 +63,7 @@ from .tools import TOOL_CLASSES
 PLUGIN_NAME = "astrbot_plugin_todo"
 
 #: 插件版本，与 metadata.yaml 的 version 保持一致（发版时两处一起改）。
-PLUGIN_VERSION = "v1.0.3"
+PLUGIN_VERSION = "v1.0.4"
 
 #: 出网请求的 User-Agent，便于 Microsoft 侧排查来源。
 USER_AGENT = f"astrbot-plugin-todo/{PLUGIN_VERSION.lstrip('v')}"
@@ -264,32 +264,71 @@ class TodoPlugin(Star):
         value = getter(key, default)
         return default if value is None else value
 
-    @staticmethod
-    def _platform_of(event: AstrMessageEvent) -> str:
-        """取事件真正的平台名。
+    # ------------------------------------------------- 平台识别（踩过两次坑）
 
-        ⚠️ 坑：AstrBot 的定时任务是用**合成事件**唤醒 Agent 的，它的
-        ``PlatformMetadata.name`` 被写死成 ``cron``（见 ``core/cron/events.py``），
-        但 ``unified_msg_origin`` 里保留的是**原始会话**（``aiocqhttp:private:xxx``）。
+    def _platform_inst(self, platform_id: str):
+        """按平台**实例 id** 取适配器实例（如 ``yume``）。取不到返回 None。"""
+        if not platform_id:
+            return None
+        getter = getattr(self.context, "get_platform_inst", None)
+        if callable(getter):
+            try:
+                inst = getter(platform_id)
+            except Exception as exc:  # noqa: BLE001 - 取不到就降级，不该影响主流程
+                logger.debug("get_platform_inst(%s) 失败: %s", platform_id, exc)
+                inst = None
+            if inst is not None:
+                return inst
+        manager = getattr(self.context, "platform_manager", None)
+        for inst in getattr(manager, "platform_insts", None) or []:
+            try:
+                if str(inst.meta().id) == platform_id:
+                    return inst
+            except Exception:  # noqa: BLE001
+                continue
+        return None
 
-        插件用「平台:用户」当账号 key，如果直接取 ``get_platform_name()``，
-        同一个人在定时任务里会算出 ``cron:1747831170``，而绑定存的是
-        ``aiocqhttp:1747831170`` —— key 对不上，就会误报「尚未绑定 Microsoft 账号」。
-        所以平台名不可信时，从会话字符串里取回真正的平台名。
+    def _platform_meta(self, platform_id: str):
+        inst = self._platform_inst(platform_id)
+        if inst is None:
+            return None
+        try:
+            return inst.meta()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _platform_type_of(self, event: AstrMessageEvent) -> str:
+        """取事件所属平台的**类型**（``aiocqhttp`` / ``telegram`` …），用于拼账号 key。
+
+        这里踩过两次坑，都写下来免得再犯：
+
+        1. 定时任务用**合成事件**唤醒 Agent，其 ``PlatformMetadata.name`` 被写死为
+           ``cron``（见 ``core/cron/events.py``），拿它当平台类型会让同一个人算出
+           ``cron:xxx``，与绑定时的 key 对不上。
+        2. ``unified_msg_origin`` 的第一段是平台**实例 id**（配置里的 ``id``，例如
+           ``yume``），**不是**平台类型 —— ``MessageSession.platform_name`` 的文档写着
+           "自 AstrBot v4.0.0 起该字段实际为 platform_id"。直接取第一段会算出
+           ``yume:xxx``，同样对不上。
+
+        所以：正常事件直接用 ``get_platform_name()``；合成事件时拿实例 id 去平台注册表
+        反查 ``meta().name``（类型），查不到才退回实例 id。
         """
         name = str(event.get_platform_name() or "").strip()
         if name and name != _CRON_PLATFORM_NAME:
             return name
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        derived = umo.split(":", 1)[0].strip()
-        return derived or name
+        platform_id = umo.split(":", 1)[0].strip()
+        if not platform_id:
+            return name
+        meta = self._platform_meta(platform_id)
+        resolved = str(getattr(meta, "name", "") or "").strip() if meta else ""
+        return resolved or platform_id
 
-    @classmethod
-    def account_id(cls, event: AstrMessageEvent) -> str:
-        """账号标识：按「平台 + 用户」隔离，保证群聊里每人各自一份凭据。
+    def account_id(self, event: AstrMessageEvent) -> str:
+        """账号标识：按「平台类型 + 用户」隔离，保证群聊里每人各自一份凭据。
 
         定时任务创建时会把原始 aid 写进 payload，优先用它（最可靠）；
-        兼容更早创建、payload 里没有 aid 的任务——它们仍能靠会话字符串还原平台名。
+        兼容更早创建、payload 里没有 aid 的任务——它们仍能靠会话字符串还原。
         """
         getter = getattr(event, "get_extra", None)
         if callable(getter):
@@ -298,7 +337,7 @@ class TodoPlugin(Star):
                 explicit = str(payload.get("aid") or "").strip()
                 if explicit:
                     return explicit
-        return f"{cls._platform_of(event)}:{event.get_sender_id()}"
+        return f"{self._platform_type_of(event)}:{event.get_sender_id()}"
 
     def _check_allowed(self, event: AstrMessageEvent) -> str | None:
         """返回 None 表示允许使用；否则返回拒绝文案。"""
@@ -1216,10 +1255,14 @@ class TodoPlugin(Star):
         if not bool(self._cfg("reminder_enabled", True)):
             return ["（配置里关闭了「定时提醒」，本次只写入了 To Do 内的提醒）"]
 
-        platform_name = (plan.session or "").split(":", 1)[0]
-        if platform_name not in _PUSH_CAPABLE_PLATFORMS:
+        # 注意：plan.session 的第一段是平台**实例 id**（如 yume），不是平台类型。
+        # 这里必须按实例 id 去查适配器，问它自己声明的 support_proactive_message；
+        # 拿实例 id 直接比类型白名单会把能推送的平台也判成"不支持"。
+        platform_id = (plan.session or "").split(":", 1)[0].strip()
+        if not self._supports_proactive(platform_id):
+            display = self._platform_type_of_session(plan.session) or platform_id or "未知"
             return [
-                f"（当前平台 {platform_name or '未知'} 不支持机器人主动发消息，"
+                f"（当前平台 {display} 不支持机器人主动发消息，"
                 "定时提醒没有创建；To Do 内的提醒不受影响）"
             ]
 
@@ -1272,6 +1315,29 @@ class TodoPlugin(Star):
         if problems:
             notes.append("⚠️ " + "；".join(problems[:3]))
         return notes
+
+    def _platform_type_of_session(self, session: str) -> str:
+        """会话串（``实例id:FriendMessage:xxx``）→ 平台类型。"""
+        platform_id = str(session or "").split(":", 1)[0].strip()
+        meta = self._platform_meta(platform_id)
+        resolved = str(getattr(meta, "name", "") or "").strip() if meta else ""
+        return resolved or platform_id
+
+    def _supports_proactive(self, platform_id: str) -> bool:
+        """该平台实例是否支持主动消息推送。
+
+        优先问适配器自己声明的 ``meta().support_proactive_message``；
+        适配器已经不在了（或有旧版本没这个字段）时，退回内置类型白名单。
+        """
+        meta = self._platform_meta(platform_id)
+        if meta is not None:
+            flag = getattr(meta, "support_proactive_message", None)
+            if isinstance(flag, bool):
+                return flag
+            name = str(getattr(meta, "name", "") or "").strip()
+            if name:
+                return name in _PUSH_CAPABLE_PLATFORMS
+        return platform_id in _PUSH_CAPABLE_PLATFORMS
 
     async def _create_reminder_job(
         self, cron_mgr, *, aid: str, task: TaskDraft, session: str,

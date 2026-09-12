@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from astrbot_plugins_todo.graph.auth import DEFAULT_SCOPE, DeviceCodeAuth
-from astrbot_plugins_todo.graph.errors import ConfigError
+from plugin_pkg.graph.auth import DEFAULT_SCOPE, DeviceCodeAuth
+from plugin_pkg.graph.errors import ConfigError
 
 
 def _auth(config: dict) -> DeviceCodeAuth:
