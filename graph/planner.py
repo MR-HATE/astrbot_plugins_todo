@@ -685,7 +685,7 @@ def render_preview(
             lines.append(f"- …另有 {len(warnings) - 8} 条提示")
 
     lines.append("")
-    lines.append(f"回复「确认」即可导入；回复「取消」放弃这次清单。")
+    lines.append("回复「确认」即可导入；回复「取消」放弃这次清单。")
     lines.append(f"（plan_id: {plan_id}）")
     return "\n".join(lines)
 
