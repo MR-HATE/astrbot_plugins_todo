@@ -11,7 +11,7 @@
 ```
 
 - 插件标识：`astrbot_plugin_todo`
-- 作者：Mr_Hate　|　版本：v1.0.0　|　许可：AGPL-3.0
+- 作者：Mr_Hate　|　版本：v1.0.3　|　许可：AGPL-3.0
 - 仓库：https://github.com/MR-HATE/astrbot_plugins_todo
 
 ---
