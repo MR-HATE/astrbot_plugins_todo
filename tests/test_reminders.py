@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from conftest import FakeCron, at, make_harness
+from conftest import PLATFORM_ID, FakeCron, FakeMeta, FakePlatform, at, make_harness
 
 REMIND_AT = at(1, "20:00")
 
@@ -25,7 +25,7 @@ def test_reminder_payload_contract():
     h = make_harness()
     h.import_now(h.event(sender="10001"), [{"title": "喝水", "remind_at": REMIND_AT}], plan_name="生活")
     payload = h.cron.jobs[0]["payload"]
-    assert payload["session"] == "aiocqhttp:private:10001"
+    assert payload["session"] == f"{PLATFORM_ID}:FriendMessage:10001"
     assert payload["sender_id"] == "10001"
     assert payload["origin"] == "plugin"  # 不用 "api"，避免强制 admin
     assert "喝水" in payload["note"]
@@ -59,10 +59,18 @@ def test_no_reminder_when_task_has_none():
     assert h.cron.jobs == [] and "reminders::aiocqhttp:10001" not in h.store
 
 
-def test_webchat_platform_skips_cron_with_explanation():
-    h = make_harness()
+def test_platform_without_proactive_support_skips_cron_with_explanation():
+    """平台门控看适配器声明的 support_proactive_message（不是平台类型白名单）。"""
+    h = make_harness(
+        platforms={
+            PLATFORM_ID: FakePlatform(),
+            "webchat": FakePlatform(
+                FakeMeta(name="webchat", platform_id="webchat", support_proactive_message=False)
+            ),
+        }
+    )
     out = h.import_now(
-        h.event(platform="webchat", sender="astrbot"),
+        h.event(platform="webchat", sender="astrbot", platform_id="webchat"),
         [{"title": "喝水", "remind_at": REMIND_AT}],
         plan_name="生活",
     )

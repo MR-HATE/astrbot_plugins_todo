@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from conftest import days
-from astrbot_plugins_todo.graph.models import PlanDraft, TaskDraft
-from astrbot_plugins_todo.tools import TOOL_CLASSES
+from plugin_pkg.graph.models import PlanDraft, TaskDraft
+from plugin_pkg.tools import TOOL_CLASSES
 
 
 def test_to_graph_task_basic_payload():
@@ -50,7 +50,7 @@ def test_task_draft_round_trip_keeps_repeat():
 
 def test_plan_draft_round_trip_keeps_sender():
     plan = PlanDraft(
-        plan_id="p1", aid="aiocqhttp:1", session="aiocqhttp:private:1",
+        plan_id="p1", aid="aiocqhttp:1", session="yume:FriendMessage:1",
         sender_id="1", list_name="生活", tasks=[TaskDraft(title="x")], created_at=1.0,
     )
     restored = PlanDraft.from_dict(plan.to_dict())

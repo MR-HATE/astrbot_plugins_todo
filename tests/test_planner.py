@@ -8,8 +8,8 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from conftest import at, days, today
-from astrbot_plugins_todo.graph import planner as P
-from astrbot_plugins_todo.graph.models import TaskDraft
+from plugin_pkg.graph import planner as P
+from plugin_pkg.graph.models import TaskDraft
 
 BASE = date(2026, 9, 14)  # 周一
 

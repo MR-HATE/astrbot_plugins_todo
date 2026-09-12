@@ -3,13 +3,24 @@
 本项目按里程碑开发，每个里程碑都在真机上验收通过后才进入下一个。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## v1.0.3
+## v1.0.4
 - 修复：**定时任务唤起时误报「尚未绑定 Microsoft 账号」**。
-  AstrBot 用合成事件（`CronMessageEvent`）唤醒 Agent，其平台名被写死为 `cron`，
-  而插件用「平台名:用户ID」当账号 key，于是同一个人的 key 变成 `cron:xxx`，
-  与绑定时的 `aiocqhttp:xxx` 对不上——凭据其实完好，只是查不到。
-  现在平台名不可信时改从 `unified_msg_origin`（合成事件里保留的是原始会话）还原，
-  新建的定时任务还会把原始 aid 直接写进 payload。**已存在的定时任务无需重建。**
+  账号 key 是「平台类型:用户ID」（如 `aiocqhttp:1747831170`），但定时任务这条路
+  有两处会把它算错，导致到点后工具找不到凭据（凭据其实完好）：
+  1. AstrBot 用合成事件 `CronMessageEvent` 唤醒 Agent，其 `PlatformMetadata.name`
+     被写死为 `cron`；
+  2. `unified_msg_origin` 的第一段是平台**实例 id**（配置里的 `id`，如 `yume`），
+     不是平台**类型**（`aiocqhttp`）——`MessageSession.platform_name` 自 v4.0.0 起
+     实际存的是 `platform_id`。
+
+  现在合成事件下会用实例 id 去平台注册表反查 `meta().name` 得到类型；查不到才退回实例 id。
+  新建的定时任务还会把原始 aid 直接写进 payload（双保险）。**已存在的定时任务无需重建。**
+- 修复：同一处思维定势导致的**提醒被静默跳过**。判断"平台是否支持主动消息"原本也是
+  拿 umo 第一段去比类型白名单，实例 id 不在白名单里就直接不建提醒。现在改为询问适配器
+  自己声明的 `meta().support_proactive_message`，白名单只作兜底。
+- 测试：fixture 里的平台**实例 id 与类型刻意取不同值**（`yume` / `aiocqhttp`），
+  并把测试目录的包名改为从目录名推导（`plugin_pkg` 别名），
+  避免"目录改名就整套跑不起来"和"fixture 恰好对上所以假绿"。
 
 ## v1.0.1
 - 使用ruff对代码进行了静态检查，修复了部分代码风格问题，提升了代码可读性和可维护性。

@@ -6,22 +6,36 @@
   由 ``tests/run_tests.py`` 发现并执行；装了 pytest 也能直接 ``pytest tests/``。
 - **不需要 pytest-asyncio**：异步逻辑在测试函数内部用 :func:`run` 驱动，
   这样同一份用例在两种运行器下都能跑。
+- **包名从目录名推导**：插件目录可能叫 ``astrbot_plugin_todo``（与 metadata 一致）
+  也可能叫 ``astrbot_plugins_todo``（历史仓库名）。用例统一 ``from plugin_pkg…``
+  导入，conftest 负责把真实目录挂到 ``plugin_pkg`` 这个名字上，
+  免得测试因为目录改名而整体跑不起来。
 - 假 Graph / 假 cron 都是纯内存实现，并记录调用，便于断言"到底发了什么请求"。
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import pathlib
 import sys
 from datetime import timedelta
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-if str(REPO_ROOT.parent) not in sys.path:  # 让 astrbot_plugins_todo 成为可导入的包
+if str(REPO_ROOT.parent) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT.parent))
 
-from astrbot_plugins_todo.graph.planner import local_today  # noqa: E402
-from astrbot_plugins_todo.main import TodoPlugin  # noqa: E402
+#: 插件目录名即包名；用别名 plugin_pkg 让用例与具体目录名解耦。
+PLUGIN_PKG = REPO_ROOT.name
+_plugin_package = importlib.import_module(PLUGIN_PKG)
+sys.modules.setdefault("plugin_pkg", _plugin_package)
+# 兼容直接用历史包名 import 的老写法
+for _legacy in ("astrbot_plugin_todo", "astrbot_plugins_todo"):
+    sys.modules.setdefault(_legacy, _plugin_package)
+
+_planner_module = importlib.import_module("plugin_pkg.graph.planner")
+local_today = _planner_module.local_today
+TodoPlugin = importlib.import_module("plugin_pkg.main").TodoPlugin
 
 
 def run(coro):
@@ -173,18 +187,55 @@ class FakeCron:
 
 # ---------------------------------------------------------------- 假事件/鉴权
 
+#: 平台**实例 id**（AstrBot 配置里的 ``id``）。刻意与平台类型取不同值——
+#: 这是为了防住"把 umo 第一段当成平台类型"这个真实踩过的坑：
+#: 只有实例 id ≠ 类型时，写错的实现才会暴露。
+PLATFORM_ID = "yume"
+#: 平台**类型**（``PlatformMetadata.name``，如 aiocqhttp / telegram）
+PLATFORM_TYPE = "aiocqhttp"
+#: 真实 umo 形如 ``{实例id}:{MessageType}:{会话id}``
+SESSION = f"{PLATFORM_ID}:FriendMessage:1747831170"
+#: 会话所属用户
+QQ_ID = "1747831170"
+
+
+class FakeMeta:
+    """对应 ``PlatformMetadata``：``name`` 是类型，``id`` 是实例 id。"""
+
+    def __init__(
+        self,
+        name: str = PLATFORM_TYPE,
+        platform_id: str = PLATFORM_ID,
+        support_proactive_message: bool = True,
+    ):
+        self.name = name
+        self.id = platform_id
+        self.description = f"{name} (fake)"
+        self.support_proactive_message = support_proactive_message
+
+
+class FakePlatform:
+    def __init__(self, meta: FakeMeta | None = None):
+        self._meta = meta or FakeMeta()
+
+    def meta(self) -> FakeMeta:
+        return self._meta
+
 
 class FakeEvent:
     def __init__(
         self,
-        platform: str = "aiocqhttp",
+        platform: str = PLATFORM_TYPE,
         sender: str = "10001",
         session: str | None = None,
         extras: dict | None = None,
+        platform_id: str = PLATFORM_ID,
     ):
         self.platform = platform
+        self.platform_id = platform_id
         self.sender = sender
-        self.unified_msg_origin = session or f"{platform}:private:{sender}"
+        # 真实 umo 由「平台实例 id」拼成，不是平台类型
+        self.unified_msg_origin = session or f"{platform_id}:FriendMessage:{sender}"
         self._extras: dict = dict(extras or {})
 
     def get_platform_name(self) -> str:
@@ -236,9 +287,30 @@ class FakeAuth:
         raise AssertionError("测试中不应真的发起授权")
 
 
+class _FakePlatformManager:
+    def __init__(self, insts: list):
+        self.platform_insts = insts
+
+
 class FakeContext:
-    def __init__(self, cron: FakeCron | None):
+    """最小 Context：只提供插件真正用到的那几项。
+
+    ``get_platform_inst`` 是"平台实例 id → 适配器实例"的查表口，
+    插件靠它把实例 id 还原成平台类型。
+    """
+
+    def __init__(self, cron: FakeCron | None, platforms: dict | None = None):
         self.cron_manager = cron
+        if platforms is None:
+            platforms = {PLATFORM_ID: FakePlatform()}
+        self._platforms = dict(platforms)
+
+    def get_platform_inst(self, platform_id: str):
+        return self._platforms.get(platform_id)
+
+    @property
+    def platform_manager(self) -> _FakePlatformManager:
+        return _FakePlatformManager(list(self._platforms.values()))
 
 
 # ---------------------------------------------------------------- 插件工厂
@@ -258,7 +330,16 @@ DEFAULT_CONFIG = {
 class PluginHarness:
     """把插件实例、假 Graph、假 cron、内存 KV 打包，方便测试取用。"""
 
-    def __init__(self, *, bound=True, config=None, graph=None, cron=None, with_cron=True):
+    def __init__(
+        self,
+        *,
+        bound=True,
+        config=None,
+        graph=None,
+        cron=None,
+        with_cron=True,
+        platforms=None,
+    ):
         self.store: dict = {}
         self.graph = graph if graph is not None else FakeGraph()
         self.cron = cron if cron is not None else FakeCron()
@@ -266,7 +347,7 @@ class PluginHarness:
         self.plugin.config = {**DEFAULT_CONFIG, **(config or {})}
         self.plugin.graph = self.graph
         self.plugin.auth = FakeAuth(bound)
-        self.plugin.context = FakeContext(self.cron if with_cron else None)
+        self.plugin.context = FakeContext(self.cron if with_cron else None, platforms)
         self.plugin.get_kv_data = self._kv_get
         self.plugin.put_kv_data = self._kv_put
         self.plugin.delete_kv_data = self._kv_del
