@@ -267,6 +267,34 @@ system prompt（配置项 `inject_rules`，默认开启）：
 | `allow_any_user` | 开 | 关闭后仅白名单用户可用 |
 | `proxy` | 空 | 企业网络需要代理时填写 |
 
+## 常见问题
+
+**Q：机器人说「还没有绑定 Microsoft 账号」，但我明明绑过了。**
+账号是按「**平台 + 用户**」隔离的（`平台名:发送者ID`）。在 QQ 里绑定的账号，在 AstrBot
+WebUI 的 Chat 页里不算数——那是另一个"用户"。要在哪用就在哪 `/todo login` 一次。
+
+**Q：任务没写进我以为的那个列表。**
+目标列表按 `plan_name` 自动创建/复用。如果模型把这次计划归纳成「出差」，任务就会进
+「出差」列表（可能新建）。用 `/todo lists` 看全部列表，或 `/todo today` 跨列表查。
+
+**Q：说「提醒我」，但没收到提醒。**
+按顺序检查：
+1. 回执里有没有「⏰ 已为 N 项创建…」——没有的话，回执会说明原因；
+2. 平台是否支持主动消息（QQ 官方接口、WebUI Chat 等**不支持**）；
+3. WebUI 左侧「未来任务」页有没有那条 `待办提醒 · XXX`；
+4. 配置项 `reminder_enabled` 是不是被关了。
+
+**Q：机器人答应了但什么都没发生。**
+大概率是模型**没有真正调用工具**（只是嘴上答应了）。插件无法阻止这种情况，但可以：
+换用支持 function calling 的模型，或直接用指令——`/todo import <计划>` 一定会走管线。
+
+**Q：改了代码但行为没变。**
+AstrBot 插件是运行时注入的，改完要在插件管理页点「**重载插件**」，刷新浏览器没用。
+另外确认代码确实同步到了运行 AstrBot 的那台机器（日志里搜 `已注册 12 个 LLM 工具`）。
+
+**Q：能不能只删任务、不删列表？**
+`/todo del <关键词>` 删单条任务；`/todo dellist <列表名>` 才删整个列表。两者都要二次确认。
+
 ## 隐私与安全
 
 - 只申请 `Tasks.ReadWrite` / `User.Read` 委派权限，**只能访问授权账号自己的待办**。
@@ -279,17 +307,44 @@ system prompt（配置项 `inject_rules`，默认开启）：
 
 ```bash
 # 目录结构
-main.py            插件入口：指令 + 工具注册 + 业务逻辑
-graph/auth.py      OAuth 设备码授权 / token 续期
-graph/client.py    Graph REST 封装（重试、限流、错误分类）
-graph/store.py     基于插件 KV 的凭据存储
-tools/             FunctionTool 定义（LLM 函数调用）
-skills/            插件内置 Skill（M3 加入）
-scripts/           开发计划 Excel 生成脚本
+main.py                     插件入口：指令 + 工具注册 + 业务逻辑
+graph/auth.py               OAuth 设备码授权 / token 续期
+graph/client.py             Graph REST 封装（重试、限流、批量、错误分类）
+graph/planner.py            时间归一化 / 校验 / 去重 / 渲染 / crontab 生成
+graph/models.py             数据模型与函数调用 Schema
+graph/store.py              基于插件 KV 的凭据存储
+tools/todo_tools.py         FunctionTool 定义（LLM 函数调用）
+skills/ms-todo-import/      插件内置 Skill（Agent 操作手册）
+tests/                      单元测试 + 手动验收清单
+scripts/                    开发计划 Excel 生成脚本、规范自检
 ```
 
-- 遵循 AstrBot 插件开发规范：使用 `httpx` 异步请求、持久化数据放 `data` 目录
-  （本插件使用插件级 KV）、提交前用 `ruff` 格式化。
+### 跑测试
+
+```bash
+python tests/run_tests.py          # 全部（90 个用例，零依赖）
+python tests/run_tests.py planner  # 只跑文件名含 planner 的
+pytest tests/                      # 装了 pytest 也能直接跑（无需 pytest-asyncio）
+```
+
+测试用假 Graph 客户端 + 假定时任务 + 内存 KV，**不会碰你的真实 To Do**。
+
+### 代码规范
+
+```bash
+python scripts/lint_check.py   # 零依赖自检：未使用 import / 行宽 / 行尾空白 / 裸 except
+ruff check . && ruff format .   # 装了 ruff 的话以它为准
+```
+
+- 行宽上限 100；`scripts/build_dev_plan.py` 用文件头的 `# lint: max-line=400` 豁免
+  （它是一张"一行一条数据"的表）。
+- 遵循 AstrBot 插件开发规范：异步 `httpx`、持久化数据放插件级 KV、不引入 `requests`。
+
+### 发版前
+
+过一遍 [`tests/manual-checklist.md`](tests/manual-checklist.md)——单元测试用假客户端，
+覆盖不到真实授权、真实 To Do 界面和到点提醒。
+
 - 灵感来源：Anthropic Agent Skills 规范、AstrBot 官方插件模板。
 
 ## 许可证

@@ -742,9 +742,17 @@ class TodoPlugin(Star):
             return f"获取待办列表失败：{exc!s}"
 
         wanted = list_name.casefold()
-        matched = [item for item in lists if str(item.get("displayName") or "").strip().casefold() == wanted]
+        matched = [
+            item
+            for item in lists
+            if str(item.get("displayName") or "").strip().casefold() == wanted
+        ]
         if not matched:
-            partial = [item for item in lists if wanted in str(item.get("displayName") or "").casefold()]
+            partial = [
+                item
+                for item in lists
+                if wanted in str(item.get("displayName") or "").casefold()
+            ]
             if len(partial) == 1:
                 matched = partial
             elif len(partial) > 1:
@@ -855,7 +863,9 @@ class TodoPlugin(Star):
         if not list_id or not task_id:
             return
         seen = await self._load_seen(list_id)
-        removed = [key for key, value in seen.items() if str((value or {}).get("task_id")) == task_id]
+        removed = [
+            key for key, value in seen.items() if str((value or {}).get("task_id")) == task_id
+        ]
         if not removed:
             return
         for key in removed:
@@ -1118,7 +1128,9 @@ class TodoPlugin(Star):
     async def _cancel_reminders_of_list(self, aid: str, list_id: str) -> int:
         """取消某个列表下所有待办的定时提醒（删除整个列表时调用）。"""
         data = await self._load_reminders(aid)
-        doomed = [key for key, value in data.items() if str((value or {}).get("list_id")) == list_id]
+        doomed = [
+            key for key, value in data.items() if str((value or {}).get("list_id")) == list_id
+        ]
         if not doomed:
             return 0
         cancelled = 0
@@ -1248,6 +1260,7 @@ class TodoPlugin(Star):
             return await cron_mgr.add_active_job(
                 name=name,
                 cron_expression=cron_expression,
+                run_once=False,
                 timezone=timezone_name,
                 payload=payload,
                 description=note,
@@ -1319,7 +1332,8 @@ class TodoPlugin(Star):
             else:
                 task_id = str(data.get("id") or "")
                 created.append((task, task_id or None))
-                recorded.append((task.source_key or task.fingerprint(list_name), task_id, task.title))
+                key = task.source_key or task.fingerprint(list_name)
+                recorded.append((key, task_id, task.title))
                 if task.steps and task_id:
                     steps_todo.append((task_id, task.steps))
         elif fresh:
@@ -1334,7 +1348,8 @@ class TodoPlugin(Star):
                     continue
                 task_id = str((result.get("task") or {}).get("id") or "")
                 created.append((task, task_id or None))
-                recorded.append((task.source_key or task.fingerprint(list_name), task_id, task.title))
+                key = task.source_key or task.fingerprint(list_name)
+                recorded.append((key, task_id, task.title))
                 if task.steps and task_id:
                     steps_todo.append((task_id, task.steps))
 

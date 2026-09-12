@@ -314,7 +314,11 @@ def parse_due(
             else:
                 local = iso.replace(tzinfo=None)
             has_clock = bool(re.search(r"\d{1,2}:\d{2}", text))
-            return local.date().isoformat(), (local.strftime("%H:%M") if has_clock else None), warnings
+            return (
+                local.date().isoformat(),
+                (local.strftime("%H:%M") if has_clock else None),
+                warnings,
+            )
 
     # 中文日期与时刻混在一起的情况（「9月18日 20:00」「明天 晚上8点」）
     if text and (raw_time is None or str(raw_time).strip() == ""):
@@ -595,7 +599,9 @@ def dedupe_batch(tasks: list[TaskDraft], list_name: str) -> tuple[list[TaskDraft
     return unique, duplicated
 
 
-def apply_seen(tasks: list[TaskDraft], list_name: str, seen: dict) -> tuple[list[TaskDraft], list[TaskDraft]]:
+def apply_seen(
+    tasks: list[TaskDraft], list_name: str, seen: dict
+) -> tuple[list[TaskDraft], list[TaskDraft]]:
     """与历史导入记录比对，返回 (待写入, 已存在而跳过)。"""
     fresh: list[TaskDraft] = []
     skipped: list[TaskDraft] = []
@@ -641,7 +647,14 @@ def format_due(
     return label
 
 
-def render_preview(list_name: str, tasks: list[TaskDraft], plan_id: str, tz_name: str, *, max_show: int = 30) -> str:
+def render_preview(
+    list_name: str,
+    tasks: list[TaskDraft],
+    plan_id: str,
+    tz_name: str,
+    *,
+    max_show: int = 30,
+) -> str:
     """生成给用户确认的预览卡片。"""
     today = local_today(tz_name)
     lines = [f"📋 待办预览 · 目标列表「{list_name}」 · 共 {len(tasks)} 项", ""]
@@ -651,7 +664,8 @@ def render_preview(list_name: str, tasks: list[TaskDraft], plan_id: str, tz_name
         lines.append(f"{index}. {flag}{task.title}")
         detail = [f"   截止：{format_due(task.due_date, task.due_time, today)}"]
         if task.remind_at:
-            detail.append(f"   提醒：{task.remind_at.replace('T', ' ')}{repeat_label(task.remind_repeat)}")
+            stamp = task.remind_at.replace("T", " ")
+            detail.append(f"   提醒：{stamp}{repeat_label(task.remind_repeat)}")
         if task.note:
             detail.append(f"   备注：{task.note}")
         if task.steps:

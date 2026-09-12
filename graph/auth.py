@@ -256,7 +256,11 @@ class DeviceCodeAuth:
         )
         self._flows[aid] = task
         task.add_done_callback(lambda t, a=aid: self._on_flow_done(a, t))
-        logger.info("device code flow started for %s (expires in %ss)", aid, int(challenge.expires_at - time.time()))
+        logger.info(
+            "device code flow started for %s (expires in %ss)",
+            aid,
+            int(challenge.expires_at - time.time()),
+        )
         return challenge
 
     def _on_flow_done(self, aid: str, task: asyncio.Task) -> None:

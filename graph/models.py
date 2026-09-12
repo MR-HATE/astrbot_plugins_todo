@@ -165,7 +165,11 @@ class PlanDraft:
             list_name=str(data.get("list_name") or ""),
             created_at=float(data.get("created_at") or 0.0),
             sender_id=str(data.get("sender_id") or ""),
-            tasks=[TaskDraft.from_dict(t) for t in (data.get("tasks") or []) if isinstance(t, dict)],
+            tasks=[
+                TaskDraft.from_dict(t)
+                for t in (data.get("tasks") or [])
+                if isinstance(t, dict)
+            ],
         )
 
 

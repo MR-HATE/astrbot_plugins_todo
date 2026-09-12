@@ -328,6 +328,10 @@ class GraphClient:
                     results.append({"status": status, "task": body, "error": None})
                 else:
                     results.append(
-                        {"status": status, "task": None, "error": _describe_batch_error(status, body)}
+                        {
+                            "status": status,
+                            "task": None,
+                            "error": _describe_batch_error(status, body),
+                        }
                     )
         return results
