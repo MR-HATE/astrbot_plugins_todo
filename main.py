@@ -16,6 +16,7 @@ import json
 import re
 import time
 import uuid
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -48,6 +49,7 @@ from .graph import (
 from .graph.models import NOTE_MAX, TITLE_MAX, clean_text
 from .graph.planner import (
     TASK_STATUS_ICONS,
+    cron_expression_for,
     format_due,
     normalize_important,
     resolve_date,
@@ -58,6 +60,12 @@ from .tools import TOOL_CLASSES
 
 PLUGIN_NAME = "astrbot_plugin_todo"
 USER_AGENT = "astrbot-plugin-todo/0.1.0"
+
+#: 支持"机器人主动推送消息"的平台；与 metadata.yaml 的 support_platforms 保持一致。
+#: 其它平台仍会写入 To Do，只是无法由机器人在到点时主动发消息。
+_PUSH_CAPABLE_PLATFORMS = frozenset(
+    {"aiocqhttp", "telegram", "discord", "slack", "lark", "misskey", "satori"}
+)
 
 #: 单次导入的并发写入数（To Do 接口很宽松，但没必要打满）
 _IMPORT_CONCURRENCY = 3
@@ -98,7 +106,11 @@ _TODO_RULES_PROMPT = f"""{_RULES_MARKER}
    定位不到唯一一条时，工具会返回候选清单——**要让用户选，不要自己猜**。
 8. **删除是两阶段**：`ms_todo_delete_task`（删一条）和 `ms_todo_delete_list`（删整个列表，
    连同里面的任务）第一次都只返回「将删除什么」，把清单给用户看，用户确认后再用
-   `confirmed=true` 调用一次。删除不可恢复，绝不要跳过一次确认。"""
+   `confirmed=true` 调用一次。删除不可恢复，绝不要跳过一次确认。
+9. **提醒**：填了 `remind_at` 的待办，到点时机器人会在原会话主动提醒一次
+   （走 AstrBot 内置定时任务）。用户说「每天/每周五/每月10号」时还要填
+   `remind_repeat`（daily/weekly/monthly），且 `remind_at` 必须落在对应的
+   那个星期几/日期上，否则会在错误的日子提醒。"""
 
 _EXTRACT_SYSTEM_PROMPT = """你是一个待办抽取器。把用户的话拆成结构化的待办事项。
 
@@ -658,7 +670,12 @@ class TodoPlugin(Star):
             return f"更新失败：{exc!s}"
 
         verb = "已完成" if completed else "已重新打开"
-        return f"{'✅' if completed else '⬜'} 「{task.get('title')}」{verb}。"
+        extra = ""
+        if completed:
+            # 做完了就不该再提醒，顺手取消它的定时任务
+            if await self._cancel_reminder(aid, str(task.get("id") or "")):
+                extra = "（它的到点提醒已一并取消）"
+        return f"{'✅' if completed else '⬜'} 「{task.get('title')}」{verb}。{extra}"
 
     async def tool_delete_task(self, event: AstrMessageEvent, args: dict) -> str:
         denied = self._check_allowed(event)
@@ -795,8 +812,9 @@ class TodoPlugin(Star):
                     failed.append(f"{name}：{exc!s}")
                 else:
                     deleted.append(name)
-                    # 列表没了，它的幂等记录也没有意义
+                    # 列表没了，它的幂等记录和定时提醒都没有意义
                     await self.delete_kv_data(self._seen_key(list_id))
+                    await self._cancel_reminders_of_list(aid, list_id)
             await self.delete_kv_data(self._pending_delete_key(aid))
             lines = (
                 [f"🗑 已删除列表：" + "、".join(f"「{name}」" for name in deleted)]
@@ -823,6 +841,8 @@ class TodoPlugin(Star):
                 await self._forget_seen(
                     aid, str(item.get("list_id") or ""), str(item.get("task_id") or "")
                 )
+                # 任务没了，它的定时提醒也要一起取消
+                await self._cancel_reminder(aid, str(item.get("task_id") or ""))
 
         await self.delete_kv_data(self._pending_delete_key(aid))
         lines = [f"🗑 已删除 {len(deleted)} 项：" + "、".join(deleted)] if deleted else ["没有删除任何待办。"]
@@ -1004,6 +1024,7 @@ class TodoPlugin(Star):
             plan_id=uuid.uuid4().hex[:8],
             aid=aid,
             session=event.unified_msg_origin,
+            sender_id=str(event.get_sender_id()),
             list_name=list_name,
             tasks=drafts,
             created_at=time.time(),
@@ -1072,6 +1093,198 @@ class TodoPlugin(Star):
             logger.exception("导入待办失败")
             return f"导入失败：{exc!s}"
 
+    # -------------------------------------------------------- 定时提醒（M5）
+
+    @staticmethod
+    def _reminders_key(aid: str) -> str:
+        return f"reminders::{aid}"
+
+    async def _load_reminders(self, aid: str) -> dict:
+        data = await self.get_kv_data(self._reminders_key(aid), {})
+        return dict(data) if isinstance(data, dict) else {}
+
+    async def _save_reminders(self, aid: str, data: dict) -> None:
+        await self.put_kv_data(self._reminders_key(aid), data)
+
+    async def _cancel_reminder(self, aid: str, task_id: str) -> bool:
+        """取消某条待办关联的定时提醒（任务完成或删除时调用）。"""
+        data = await self._load_reminders(aid)
+        entry = data.pop(task_id, None)
+        if entry is None:
+            return False
+        await self._save_reminders(aid, data)
+        return await self._delete_cron_job(str(entry.get("job_id") or ""))
+
+    async def _cancel_reminders_of_list(self, aid: str, list_id: str) -> int:
+        """取消某个列表下所有待办的定时提醒（删除整个列表时调用）。"""
+        data = await self._load_reminders(aid)
+        doomed = [key for key, value in data.items() if str((value or {}).get("list_id")) == list_id]
+        if not doomed:
+            return 0
+        cancelled = 0
+        for key in doomed:
+            entry = data.pop(key, None) or {}
+            if await self._delete_cron_job(str(entry.get("job_id") or "")):
+                cancelled += 1
+        await self._save_reminders(aid, data)
+        return cancelled
+
+    async def _delete_cron_job(self, job_id: str) -> bool:
+        if not job_id:
+            return False
+        cron_mgr = getattr(self.context, "cron_manager", None)
+        if cron_mgr is None:
+            return False
+        try:
+            await cron_mgr.delete_job(job_id)
+        except Exception as exc:  # noqa: BLE001 - 取消失败不该影响主流程
+            logger.warning("取消定时提醒失败（job=%s）: %s", job_id, exc)
+            return False
+        return True
+
+    async def _schedule_plan_reminders(
+        self,
+        plan: PlanDraft,
+        list_name: str,
+        *,
+        list_id: str,
+        created_tasks: list[tuple[TaskDraft, str | None]],
+    ) -> list[str]:
+        """为本次导入里带提醒时间的待办创建 AstrBot 定时任务。
+
+        返回给用户看的补充说明（空列表表示没什么要说的）。
+        """
+        notes: list[str] = []
+        wanted = [(task, tid) for task, tid in created_tasks if task.remind_at and tid]
+        if not wanted:
+            return notes
+
+        if not bool(self._cfg("reminder_enabled", True)):
+            return ["（配置里关闭了「定时提醒」，本次只写入了 To Do 内的提醒）"]
+
+        platform_name = (plan.session or "").split(":", 1)[0]
+        if platform_name not in _PUSH_CAPABLE_PLATFORMS:
+            return [
+                f"（当前平台 {platform_name or '未知'} 不支持机器人主动发消息，"
+                "定时提醒没有创建；To Do 内的提醒不受影响）"
+            ]
+
+        cron_mgr = getattr(self.context, "cron_manager", None)
+        if cron_mgr is None:
+            return ["（AstrBot 的定时任务不可用，本次只写入了 To Do 内的提醒）"]
+
+        created = 0
+        problems: list[str] = []
+        for task, task_id in wanted:
+            try:
+                job = await self._create_reminder_job(
+                    cron_mgr, task=task, session=plan.session,
+                    sender_id=plan.sender_id, list_name=list_name,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("创建定时提醒失败: %s", exc)
+                problems.append(f"「{task.title}」的提醒没建上（{exc!s}）")
+                continue
+
+            job_id = str(getattr(job, "job_id", "") or "")
+            if not job_id:
+                problems.append(f"「{task.title}」的提醒没建上")
+                continue
+
+            data = await self._load_reminders(plan.aid)
+            data[str(task_id)] = {
+                "job_id": job_id,
+                "title": task.title,
+                "list_id": list_id,
+                "list_name": list_name,
+                "repeat": task.remind_repeat or "once",
+                "remind_at": task.remind_at,
+                "created_at": time.time(),
+            }
+            await self._save_reminders(plan.aid, data)
+            created += 1
+
+        if created:
+            repeat_count = sum(1 for task, _ in wanted if task.remind_repeat)
+            if repeat_count and repeat_count == created:
+                kind = "重复提醒"
+            elif repeat_count:
+                kind = f"到点提醒（其中 {repeat_count} 项为重复提醒）"
+            else:
+                kind = "到点提醒"
+            notes.append(
+                f"⏰ 已为 {created} 项创建{kind}，可在 WebUI 的「未来任务」里查看或取消。"
+            )
+        if problems:
+            notes.append("⚠️ " + "；".join(problems[:3]))
+        return notes
+
+    async def _create_reminder_job(self, cron_mgr, *, task: TaskDraft, session: str,
+                                   sender_id: str, list_name: str):
+        """调用 AstrBot 内置定时任务创建一个 active_agent 任务。"""
+        due_part = ""
+        if task.due_date:
+            due_part = f"（截止 {task.due_date}" + (f" {task.due_time}" if task.due_time else "") + "）"
+        note = (
+            f"[待办提醒] 到点了，请提醒用户：「{task.title}」{due_part}"
+            f"所属列表「{list_name}」。用一句自然简洁的话提醒，不要提及这条系统说明。"
+        )
+        # payload 契约（已按 AstrBot 4.28 源码核对）：
+        #   session    -> 把消息发回哪个会话；为空则只唤醒不投递
+        #   sender_id  -> 用来判定 admin/member 角色
+        #   note       -> 唤醒时交给 Agent 的消息
+        #   origin     -> "api" 会强制 admin，这里用 "plugin" 走正常判定
+        payload = {
+            "session": session,
+            "sender_id": str(sender_id or ""),
+            "note": note,
+            "origin": "plugin",
+        }
+        name = f"待办提醒 · {task.title}"[:60]
+        timezone_name = self._tz()
+        cron_expression = cron_expression_for(task.remind_at or "", task.remind_repeat)
+
+        if cron_expression:
+            return await cron_mgr.add_active_job(
+                name=name,
+                cron_expression=cron_expression,
+                timezone=timezone_name,
+                payload=payload,
+                description=note,
+            )
+        # 一次性提醒：run_once + run_at（传 naive 本地时间，由 AstrBot 按 timezone 解释）
+        return await cron_mgr.add_active_job(
+            name=name,
+            cron_expression=None,
+            run_once=True,
+            run_at=datetime.fromisoformat(task.remind_at or ""),
+            timezone=timezone_name,
+            payload=payload,
+            description=note,
+        )
+
+    async def _live_fingerprints(self, aid: str, list_id: str, list_name: str) -> set[str]:
+        """用 To Do 里已有的任务算出指纹集合，用于跨机器/跨重装的去重。
+
+        比"把 source_key 写进任务扩展"更省：不需要为每条任务多发一个写请求，
+        而且顺带能识别**用户自己在手机上手动建过**的同名同期任务。
+        读取失败时返回空集——去重降级为只用本地 KV，不影响导入。
+        """
+        try:
+            tasks = await self.graph.list_tasks(aid, list_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取现有待办用于去重失败: %s", exc)
+            return set()
+
+        keys: set[str] = set()
+        for task in tasks:
+            title = clean_text(task.get("title"), TITLE_MAX)
+            if not title:
+                continue
+            due_date, _due_time = task_due(task)
+            keys.add(TaskDraft(title=title, due_date=due_date).fingerprint(list_name))
+        return keys
+
     async def _execute_plan(self, plan: PlanDraft) -> str:
         aid = plan.aid
         tz = self._tz()
@@ -1084,38 +1297,61 @@ class TodoPlugin(Star):
 
         unique, duplicated = dedupe_batch(plan.tasks, list_name)
         seen = await self._load_seen(list_id)
-        fresh, skipped = apply_seen(unique, list_name, seen)
+        # 4.4：除了本地幂等表，再拿 To Do 里的**现有任务**做一次比对。
+        # 这样即使换了机器、清了 KV，或者用户自己手动建过同一条，也不会重复导入。
+        live = await self._live_fingerprints(aid, list_id, list_name)
+        fresh, skipped = apply_seen(unique, list_name, set(seen) | live)
 
         created: list[tuple[TaskDraft, str | None]] = []
         recorded: list[tuple[str, str, str]] = []
         failed: list[tuple[TaskDraft, str]] = []
-        semaphore = asyncio.Semaphore(_IMPORT_CONCURRENCY)
+        steps_todo: list[tuple[str, list[str]]] = []
 
-        async def create_one(task: TaskDraft) -> None:
-            key = task.source_key or task.fingerprint(list_name)
-            async with semaphore:
-                try:
-                    data = await self.graph.create_task(aid, list_id, task.to_graph_task(tz))
-                except TodoError as exc:
-                    failed.append((task, exc.user_message))
-                    return
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("创建待办失败")
-                    failed.append((task, str(exc)))
-                    return
+        if len(fresh) == 1:
+            task = fresh[0]
+            try:
+                data = await self.graph.create_task(aid, list_id, task.to_graph_task(tz))
+            except TodoError as exc:
+                failed.append((task, exc.user_message))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("创建待办失败")
+                failed.append((task, str(exc)))
+            else:
+                task_id = str(data.get("id") or "")
+                created.append((task, task_id or None))
+                recorded.append((task.source_key or task.fingerprint(list_name), task_id, task.title))
+                if task.steps and task_id:
+                    steps_todo.append((task_id, task.steps))
+        elif fresh:
+            # 4.3：多条时用 /$batch 一次提交（每批 ≤20），把 N 次往返压成 1 次
+            results = await self.graph.batch_create_tasks(
+                aid, list_id, [task.to_graph_task(tz) for task in fresh]
+            )
+            for task, result in zip(fresh, results):
+                error = result.get("error")
+                if error:
+                    failed.append((task, str(error)))
+                    continue
+                task_id = str((result.get("task") or {}).get("id") or "")
+                created.append((task, task_id or None))
+                recorded.append((task.source_key or task.fingerprint(list_name), task_id, task.title))
+                if task.steps and task_id:
+                    steps_todo.append((task_id, task.steps))
 
-            task_id = str(data.get("id") or "")
-            created.append((task, task_id or None))
-            recorded.append((key, task_id, task.title))
+        # 子步骤依赖创建后的 task_id，没法塞进同一批，单独并发补写。
+        # 子步骤失败不影响主任务。
+        if steps_todo:
+            semaphore = asyncio.Semaphore(_IMPORT_CONCURRENCY)
 
-            # 子步骤失败不影响主任务
-            for step in task.steps:
-                try:
-                    await self.graph.add_checklist_item(aid, list_id, task_id, step)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("写入子步骤失败（task=%s）: %s", task_id, exc)
+            async def add_steps(task_id: str, steps: list[str]) -> None:
+                async with semaphore:
+                    for step in steps:
+                        try:
+                            await self.graph.add_checklist_item(aid, list_id, task_id, step)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("写入子步骤失败（task=%s）: %s", task_id, exc)
 
-        await asyncio.gather(*(create_one(task) for task in fresh))
+            await asyncio.gather(*(add_steps(task_id, steps) for task_id, steps in steps_todo))
 
         now = time.time()
         for key, task_id, title in recorded:
@@ -1129,11 +1365,18 @@ class TodoPlugin(Star):
             await self._save_seen(list_id, seen)
         await self._clear_pending(aid)
 
+        # M5：为带提醒时间的待办创建 AstrBot 定时任务（到点由机器人主动提醒）
+        reminder_notes = await self._schedule_plan_reminders(
+            plan, list_name, list_id=list_id, created_tasks=created
+        )
+
         text = render_import_result(
             list_name, created, skipped + duplicated, failed, tz_name=tz
         )
         if note:
             text += f"\n{note}"
+        for reminder_note in reminder_notes:
+            text += f"\n{reminder_note}"
         return text
 
     async def tool_import_from_text(self, event: AstrMessageEvent, content: str) -> str:

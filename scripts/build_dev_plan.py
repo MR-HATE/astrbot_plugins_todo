@@ -93,9 +93,9 @@ PLAN_ROWS: list[list[str]] = [
     ["M4 查询、管理与 WebUI", "4.2", "增删改类工具",
      "ms_todo_update_task（改期/优先级/标题/备注/清除截止，支持相对日期）/ ms_todo_complete_task / ms_todo_delete_task（两阶段确认）/ ms_todo_add_checklist_items；按标题模糊定位，匹配多条时返回候选交由用户选择；/todo done、/todo del 指令兜底", "tools/todo_tools.py, main.py", "4.1", "已完成", "5"],
     ["M4 查询、管理与 WebUI", "4.3", "批量与限流优化",
-     "POST /$batch 每批 ≤20 个请求；失败分批回退为并发 3 + 429 退避；记录部分失败明细", "graph/client.py", "4.2", "待开始", "4"],
-    ["M4 查询、管理与 WebUI", "4.4", "幂等与去重",
-     "source_key 写入本地 KV；可选 openTypeExtension（extensionName 仅字母数字下划线）写进任务本身，换机器也不重复", "graph/planner.py", "4.3", "待开始", "4"],
+     "POST /$batch 每批 ≤20 个请求（子请求相对 url + Content-Type，外层 Authorization 通用），结果按 id 对应、逐条判 status；单条走直连路径；子步骤依赖 task_id 故单独并发补写；失败逐条归类（429/401/403/4xx 文案）", "graph/client.py, main.py", "4.2", "已完成", "4"],
+    ["M4 查询、管理与 WebUI", "4.4", "跨机器幂等与去重",
+     "除本地 KV 幂等表外，导入前读取目标列表的现有任务并计算同一套指纹，实现换机器/重装/用户手动建过的情况下也不重复；读取失败时降级为只用本地 KV，不影响导入（比原计划的 openTypeExtension 方案少一次写请求，且能识别手动创建的任务）", "main.py, graph/planner.py", "4.3", "已完成", "4"],
     ["M4 查询、管理与 WebUI", "4.5", "WebUI 配置（不需要单独做）",
      "原计划的插件 Pages 已取消：用户要的「在 WebUI 里配置」由 _conf_schema.json 原生实现（AstrBot 插件配置弹窗），M1 即已交付；官方文档也建议少量配置项优先用 schema 而非 Pages", "-", "M1", "已取消", "0"],
     ["M4 查询、管理与 WebUI", "4.6", "（随 4.5 取消）",
@@ -104,14 +104,14 @@ PLAN_ROWS: list[list[str]] = [
      "ms_todo_delete_list：删除整个列表及其任务，两阶段确认（先报告列表内任务数/未完成数）；默认列表（wellknownListName=defaultList）拒绝删除；名称歧义时列出候选；删除后清理该列表的幂等记录；/todo dellist 指令兜底", "tools/todo_tools.py, main.py", "4.2", "已完成", "2"],
 
     # ---------------- M5
-    ["M5 定时提醒（复用 AstrBot 内置定时任务）", "5.1", "提醒时间解析",
-     "支持「出发前一天 20:00」「每天早上 8 点」等；无提醒时间时不创建定时任务，仅用 To Do 自身提醒", "graph/planner.py", "M2", "待开始", "3"],
+    ["M5 定时提醒（复用 AstrBot 内置定时任务）", "5.1", "提醒时间解析与重复",
+     "「出发前一天 20:00」等一次性提醒沿用既有解析；新增 remind_repeat（daily/weekly/monthly，兼容「每天/每周/每月」中文说法）并转成 5 段 crontab（周几/几号从 remind_at 推导）；预览与回执中标注重复方式", "graph/planner.py, graph/models.py", "M2", "已完成", "3"],
     ["M5 定时提醒（复用 AstrBot 内置定时任务）", "5.2", "调用内置 cron 创建提醒",
-     "context.cron_manager.add_active_job(name=..., run_once=True, run_at=..., timezone=..., payload={session, sender_id, note, origin})；周期提醒用 cron_expression", "graph/reminder.py", "5.1", "待开始", "5"],
+     "context.cron_manager.add_active_job：一次性用 run_once+run_at（naive 本地时间 + timezone），重复用 cron_expression；payload 契约按 4.28 源码核对为 {session, sender_id, note, origin=plugin}（origin=api 会强制 admin，故不用）", "main.py", "5.1", "已完成", "5"],
     ["M5 定时提醒（复用 AstrBot 内置定时任务）", "5.3", "任务与 job 关联",
-     "导入时记录 task_id ↔ job_id 映射；任务完成/删除时同步 delete_job，避免僵尸提醒", "graph/reminder.py", "5.2", "待开始", "3"],
+     "reminders::{aid} 记录 task_id→job_id（含 list_id）；任务完成、删除任务、删除整个列表时同步 delete_job；定时任务不可用时降级为仅 To Do 提醒并告知用户", "main.py", "5.2", "已完成", "3"],
     ["M5 定时提醒（复用 AstrBot 内置定时任务）", "5.4", "平台能力与降级",
-     "仅在支持主动消息的平台（aiocqhttp/telegram/discord/slack/lark 等）创建提醒；不支持时明确告知用户改用 To Do 自提醒", "main.py", "5.2", "待开始", "2"],
+     "仅在支持主动消息的平台（aiocqhttp/telegram/discord/slack/lark/misskey/satori）创建提醒；不支持时明确告知用户只有 To Do 自提醒；reminder_enabled 可整体关闭", "main.py", "5.2", "已完成", "2"],
     ["M5 定时提醒（复用 AstrBot 内置定时任务）", "5.5", "验收",
      "到点机器人在原会话主动提醒；WebUI「未来任务」页可见该任务；删除待办后提醒同步消失", "验收记录", "5.1-5.4", "待开始", "2"],
 
@@ -176,8 +176,8 @@ MILESTONE_ROWS = [
     ["M1", "骨架与授权闭环", "每个用户能各自完成绑定，凭据可持久化并自动续期", "已完成（已验收）", ""],
     ["M2", "导入链路", "自然语言 → 预览 → 确认 → 写入指定列表", "已完成（已验收）", ""],
     ["M3", "Skill", "Agent 按操作手册稳定完成抽取与确认流程", "已完成（已验收）", ""],
-    ["M4", "查询、管理与 WebUI", "增删改查 + 批量与幂等（WebUI 配置由 schema 原生提供，不需要单独开发）", "进行中（4.1/4.2/4.7 已完成）", ""],
-    ["M5", "定时提醒", "复用 AstrBot 内置定时任务创建提醒", "待开始", ""],
+    ["M4", "查询、管理与 WebUI", "增删改查 + 批量与幂等（WebUI 配置由 schema 原生提供，不需要单独开发）", "已完成（4.1/4.2/4.3/4.4/4.7 全部完成）", ""],
+    ["M5", "定时提醒", "复用 AstrBot 内置定时任务创建提醒", "已完成（待真机验收）", ""],
     ["M6", "测试与发布", "单测/端到端/规范/文档/发布", "待开始", ""],
 ]
 
@@ -292,7 +292,18 @@ CONFIG_ROWS = [
 
 def main() -> int:
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "开发计划.xlsx"
-    path = build(out)
+    try:
+        path = build(out)
+    except PermissionError:
+        # 最常见的原因是这份 xlsx 正在 Excel/WPS 里开着，文件被独占。
+        print(
+            f"❌ 无法写入 {out}\n"
+            f"   文件正被其它程序占用（多半是 Excel/WPS 打开着它）。\n"
+            f"   请关闭该文件后重新运行；也可以用参数指定另一个输出路径：\n"
+            f"   python scripts/build_dev_plan.py <输出路径>",
+            file=sys.stderr,
+        )
+        return 1
     print(f"已生成: {path}")
     print(f"工作表: 开发计划 / 里程碑概览 / 决策记录 / 工具清单 / 配置项 / 风险与对策")
     print(f"任务行数: 主计划 {len(PLAN_ROWS)} 行")

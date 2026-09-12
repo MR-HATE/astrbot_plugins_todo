@@ -22,6 +22,27 @@ from .errors import GraphAPIError
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 _MAX_RETRY_AFTER = 60.0
 
+#: Graph JSON batching 的硬限制：每个 $batch 最多 20 个子请求
+_BATCH_MAX = 20
+
+
+def _describe_batch_error(status: int, body: dict | None) -> str:
+    """把批处理里单条子请求的错误整理成一句人话。"""
+    code = message = ""
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            code = str(error.get("code") or "")
+            message = str(error.get("message") or "")
+    if status == 429:
+        return "Microsoft 接口限流（429），请稍后重试"
+    if status == 401:
+        return "授权已过期，需要重新授权"
+    if status == 403:
+        return "Microsoft 拒绝了本次操作（403），请确认权限与账号类型"
+    detail = message or code or "未知错误"
+    return f"HTTP {status}：{detail[:200]}"
+
 
 def _safe_json(resp: httpx.Response) -> dict:
     try:
@@ -259,3 +280,54 @@ class GraphClient:
             json={"displayName": display_name},
         )
         return data if isinstance(data, dict) else {}
+
+    # ------------------------------------------------------------------ 批量
+
+    async def batch_create_tasks(
+        self, aid: str, list_id: str, payloads: list[dict]
+    ) -> list[dict]:
+        """用 JSON batching（``POST /$batch``）一次创建多条任务。
+
+        每批最多 20 个子请求（Graph 硬限制）。返回与 ``payloads`` **等长且同序**
+        的列表，元素形如 ``{"status": int, "task": dict | None, "error": str | None}``。
+
+        注意：批处理自身的 200 只代表"请求被受理"，每条子请求是否成功要看它的 status；
+        另外子请求的 url 必须是相对路径，带 body 时必须给 Content-Type。
+        """
+        results: list[dict] = []
+        for start in range(0, len(payloads), _BATCH_MAX):
+            chunk = payloads[start : start + _BATCH_MAX]
+            requests = [
+                {
+                    "id": str(index),
+                    "method": "POST",
+                    "url": f"/me/todo/lists/{list_id}/tasks",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": payload,
+                }
+                for index, payload in enumerate(chunk)
+            ]
+            data = await self.post(aid, "/$batch", json={"requests": requests})
+
+            by_id: dict[str, dict] = {}
+            if isinstance(data, dict):
+                for item in data.get("responses") or []:
+                    if isinstance(item, dict):
+                        by_id[str(item.get("id"))] = item
+
+            for index in range(len(chunk)):
+                item = by_id.get(str(index))
+                if item is None:
+                    results.append(
+                        {"status": 0, "task": None, "error": "批处理未返回这条请求的结果"}
+                    )
+                    continue
+                status = int(item.get("status") or 0)
+                body = item.get("body") if isinstance(item.get("body"), dict) else None
+                if 200 <= status < 300 and body is not None:
+                    results.append({"status": status, "task": body, "error": None})
+                else:
+                    results.append(
+                        {"status": status, "task": None, "error": _describe_batch_error(status, body)}
+                    )
+        return results

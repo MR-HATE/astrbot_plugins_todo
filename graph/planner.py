@@ -406,6 +406,14 @@ def normalize_tasks(raw_tasks, tz_name: str, *, now: datetime | None = None) -> 
         note = clean_text(item.get("note"), NOTE_MAX) or None
         source_key = clean_text(item.get("source_key"), 64) or None
 
+        remind_repeat, repeat_warning = normalize_repeat(item.get("remind_repeat"))
+        if repeat_warning:
+            warnings.append(repeat_warning)
+        if remind_repeat and not remind_at:
+            reminders_hint = "说了重复提醒但没给提醒时间，已忽略重复设置"
+            warnings.append(reminders_hint)
+            remind_repeat = None
+
         # 注意：source_key 留空时**不在这里**补默认值——默认指纹要带上目标列表名，
         # 而列表是在导入阶段才解析出来的，所以由调用方（main.py）补齐。
         drafts.append(
@@ -416,6 +424,7 @@ def normalize_tasks(raw_tasks, tz_name: str, *, now: datetime | None = None) -> 
                 importance=importance,
                 note=note,
                 remind_at=remind_at,
+                remind_repeat=remind_repeat,
                 steps=steps,
                 source_key=source_key,
                 warnings=warnings,
@@ -423,6 +432,58 @@ def normalize_tasks(raw_tasks, tz_name: str, *, now: datetime | None = None) -> 
         )
 
     return drafts
+
+
+#: 重复提醒的中文/英文说法
+_REPEAT_ALIASES = {
+    "daily": "daily", "每天": "daily", "每日": "daily", "天天": "daily", "everyday": "daily",
+    "weekly": "weekly", "每周": "weekly", "每星期": "weekly", "每礼拜": "weekly",
+    "monthly": "monthly", "每月": "monthly", "每个月": "monthly",
+}
+
+
+def normalize_repeat(raw: object) -> tuple[str | None, str | None]:
+    """把「每天/每周/每月」整成 cron 用的枚举。"""
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if not text or text.lower() in ("none", "null", "false", "不重复", "一次"):
+        return None, None
+    value = _REPEAT_ALIASES.get(text.lower()) or _REPEAT_ALIASES.get(text)
+    if value:
+        return value, None
+    if "天" in text:
+        return "daily", f"重复方式「{raw}」按「每天」处理"
+    if "周" in text or "星期" in text or "礼拜" in text:
+        return "weekly", f"重复方式「{raw}」按「每周」处理"
+    if "月" in text:
+        return "monthly", f"重复方式「{raw}」按「每月」处理"
+    return None, f"重复方式「{raw}」无法识别，已按「只提醒一次」处理"
+
+
+_CRON_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def cron_expression_for(remind_at: str, repeat: str | None) -> str | None:
+    """把提醒时间 + 重复方式转成 AstrBot 定时任务用的 5 段 crontab。
+
+    ``remind_at`` 是本地时间 ``YYYY-MM-DDTHH:MM``。返回 None 表示"只提醒一次"，
+    由调用方改用 ``run_once`` + ``run_at``。
+    """
+    if not repeat:
+        return None
+    try:
+        moment = datetime.fromisoformat(remind_at)
+    except ValueError:
+        return None
+    minute, hour = moment.minute, moment.hour
+    if repeat == "daily":
+        return f"{minute} {hour} * * *"
+    if repeat == "weekly":
+        return f"{minute} {hour} * * {_CRON_WEEKDAYS[moment.weekday()]}"
+    if repeat == "monthly":
+        return f"{minute} {hour} {moment.day} * *"
+    return None
 
 
 def parse_remind(
@@ -590,7 +651,7 @@ def render_preview(list_name: str, tasks: list[TaskDraft], plan_id: str, tz_name
         lines.append(f"{index}. {flag}{task.title}")
         detail = [f"   截止：{format_due(task.due_date, task.due_time, today)}"]
         if task.remind_at:
-            detail.append(f"   提醒：{task.remind_at.replace('T', ' ')}")
+            detail.append(f"   提醒：{task.remind_at.replace('T', ' ')}{repeat_label(task.remind_repeat)}")
         if task.note:
             detail.append(f"   备注：{task.note}")
         if task.steps:
@@ -632,13 +693,17 @@ def render_import_result(
             lines.append(f"{index}. {task.title}{due}")
             if task.steps:
                 lines.append(f"   子步骤 {len(task.steps)} 条")
+            if task.remind_at:
+                lines.append(
+                    f"   ⏰ {task.remind_at.replace('T', ' ')}{repeat_label(task.remind_repeat)}"
+                )
     else:
         lines = [f"ℹ️ 没有新增待办 · 列表「{list_name}」"]
 
     if skipped:
         lines.append("")
         lines.append(
-            f"⏭ 跳过 {len(skipped)} 项（之前已导入过）："
+            f"⏭ 跳过 {len(skipped)} 项（To Do 里已有同名同期的待办）："
             + "、".join(t.title for t in skipped[:5])
             + ("…" if len(skipped) > 5 else "")
         )
@@ -653,6 +718,14 @@ def render_import_result(
 
 
 # ---------------------------------------------------------------- 任务查询
+
+_REPEAT_LABELS = {"daily": "，每天重复", "weekly": "，每周重复", "monthly": "，每月重复"}
+
+
+def repeat_label(repeat: str | None) -> str:
+    """把提醒重复方式渲染成中文后缀（无重复时返回空串）。"""
+    return _REPEAT_LABELS.get(str(repeat or ""), "")
+
 
 TASK_STATUS_ICONS = {
     "completed": "✅",
@@ -809,17 +882,24 @@ def plan_expired(created_at: float, *, now: float, ttl: int = PENDING_TTL) -> bo
 __all__ = [
     "PENDING_TTL",
     "apply_seen",
+    "cron_expression_for",
     "dedupe_batch",
+    "filter_tasks",
     "format_due",
     "get_tz",
     "local_now",
     "local_today",
+    "normalize_repeat",
+    "normalize_task_status",
     "normalize_tasks",
     "parse_due",
     "plan_expired",
     "render_import_result",
     "render_preview",
+    "render_task_list",
     "resolve_date",
     "resolve_time",
+    "sort_tasks",
+    "task_due",
     "weekday_cn",
 ]

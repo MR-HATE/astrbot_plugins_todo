@@ -63,6 +63,8 @@ class TaskDraft:
     note: str | None = None
     remind_at: str | None = None
     """YYYY-MM-DDTHH:MM，本地时间（配合配置时区）"""
+    remind_repeat: str | None = None
+    """提醒是否重复：``daily`` / ``weekly`` / ``monthly``；None 表示只提醒一次"""
     steps: list[str] = field(default_factory=list)
     source_key: str | None = None
     warnings: list[str] = field(default_factory=list)
@@ -110,6 +112,7 @@ class TaskDraft:
             "importance": self.importance,
             "note": self.note,
             "remind_at": self.remind_at,
+            "remind_repeat": self.remind_repeat,
             "steps": list(self.steps),
             "source_key": self.source_key,
         }
@@ -123,6 +126,7 @@ class TaskDraft:
             importance=str(data.get("importance") or "normal"),
             note=data.get("note") or None,
             remind_at=data.get("remind_at") or None,
+            remind_repeat=data.get("remind_repeat") or None,
             steps=[clean_text(s, STEP_MAX) for s in (data.get("steps") or []) if s],
             source_key=data.get("source_key") or None,
         )
@@ -138,6 +142,8 @@ class PlanDraft:
     list_name: str
     tasks: list[TaskDraft] = field(default_factory=list)
     created_at: float = 0.0
+    sender_id: str = ""
+    """发起导入的用户 ID（定时任务用它判断角色，也方便以后区分多用户）"""
 
     def to_dict(self) -> dict:
         return {
@@ -146,6 +152,7 @@ class PlanDraft:
             "session": self.session,
             "list_name": self.list_name,
             "created_at": self.created_at,
+            "sender_id": self.sender_id,
             "tasks": [t.to_dict() for t in self.tasks],
         }
 
@@ -157,6 +164,7 @@ class PlanDraft:
             session=str(data.get("session") or ""),
             list_name=str(data.get("list_name") or ""),
             created_at=float(data.get("created_at") or 0.0),
+            sender_id=str(data.get("sender_id") or ""),
             tasks=[TaskDraft.from_dict(t) for t in (data.get("tasks") or []) if isinstance(t, dict)],
         )
 
@@ -193,6 +201,15 @@ TASK_ITEM_SCHEMA: dict = {
         "remind_at": {
             "type": "string",
             "description": "提醒时间，格式 YYYY-MM-DDTHH:MM（本地时间）。用户明确要求提醒时才填。",
+        },
+        "remind_repeat": {
+            "type": "string",
+            "enum": ["none", "daily", "weekly", "monthly"],
+            "description": (
+                "提醒是否重复：用户说「每天」「每周五」「每月10号」时分别填 "
+                "daily / weekly / monthly，并让 remind_at 落在最近一次的对应时刻；"
+                "只说一次性提醒就填 none 或留空。"
+            ),
         },
         "steps": {
             "type": "array",
