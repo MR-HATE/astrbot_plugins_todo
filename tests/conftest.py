@@ -180,16 +180,41 @@ class FakeEvent:
         platform: str = "aiocqhttp",
         sender: str = "10001",
         session: str | None = None,
+        extras: dict | None = None,
     ):
         self.platform = platform
         self.sender = sender
         self.unified_msg_origin = session or f"{platform}:private:{sender}"
+        self._extras: dict = dict(extras or {})
 
     def get_platform_name(self) -> str:
         return self.platform
 
     def get_sender_id(self) -> str:
         return self.sender
+
+    # 与 AstrMessageEvent 对齐的 extras 接口（定时任务合成事件靠它传 cron_payload）
+    def get_extra(self, key: str | None = None, default=None):
+        if key is None:
+            return self._extras
+        return self._extras.get(key, default)
+
+    def set_extra(self, key: str, value) -> None:
+        self._extras[key] = value
+
+
+def cron_event(session: str, sender: str, payload: dict | None = None) -> FakeEvent:
+    """构造一个「定时任务唤起」的合成事件。
+
+    真实实现里 ``CronMessageEvent`` 的 PlatformMetadata.name 被写死为 ``cron``，
+    但 ``session`` 仍是原始会话——这个 helper 刻意复刻这一点，用来防"账号 key 算错"回归。
+    """
+    return FakeEvent(
+        platform="cron",
+        sender=sender,
+        session=session,
+        extras={"cron_payload": payload} if payload is not None else None,
+    )
 
 
 class FakeStatus:
@@ -260,7 +285,9 @@ class PluginHarness:
         return FakeEvent(**kwargs)
 
     def pending_key(self, event: FakeEvent) -> str:
-        return f"pending::{event.get_platform_name()}:{event.get_sender_id()}"
+        # 走插件自己的 account_id，而不是重新拼「平台:发送者」——
+        # 否则定时任务合成事件（平台名是 cron）这层逻辑就测不到了。
+        return f"pending::{self.plugin.account_id(event)}"
 
     # 用例都是同步函数，这里统一用 run() 驱动插件的异步工具方法，
     # 免得每个断言点都写一遍 asyncio.run。

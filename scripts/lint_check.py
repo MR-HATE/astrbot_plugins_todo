@@ -31,6 +31,27 @@ MAX_LINE = 100
 #: 用于「一张表 = 一行一条数据」这类拆行反而更难读的情况。
 _MAX_LINE_DIRECTIVE = re.compile(r"#\s*lint:\s*max-line\s*=\s*(\d+)")
 
+#: ``# noqa`` / ``# noqa: E501,F401``。语义与 ruff 对齐：裸 noqa 免除该行全部检查，
+#: 带码的只免列出的那几条——所以 ``# noqa: E731`` 并不能让一个超长行逃过 E501。
+_NOQA_RE = re.compile(r"#\s*noqa(?::\s*([A-Za-z0-9, ]+))?", re.IGNORECASE)
+
+
+def _noqa(line: str) -> tuple[bool, set[str]]:
+    """解析行内 noqa，返回 (是否裸 noqa, 明确列出的规则码集合)。"""
+    match = _NOQA_RE.search(line)
+    if not match:
+        return False, set()
+    if match.group(1) is None:
+        return True, set()
+    codes = {code.strip().upper() for code in match.group(1).split(",") if code.strip()}
+    return False, codes
+
+
+def _exempt(line: str, *codes: str) -> bool:
+    """该行的指定规则是否被 noqa 免除。"""
+    bare, listed = _noqa(line)
+    return bare or any(code.upper() in listed for code in codes)
+
 
 def _iter_files(targets: list[pathlib.Path]):
     for target in targets:
@@ -95,13 +116,11 @@ def check_file(path: pathlib.Path) -> list[str]:
             pass
 
     for index, line in enumerate(lines, start=1):
-        if "# noqa" in line:
-            continue
-        if len(line) > max_line:
+        if len(line) > max_line and not _exempt(line, "E501"):
             problems.append(f"{path}:{index}: 行宽 {len(line)} > {max_line}")
-        if line.rstrip() != line:
+        if line.rstrip() != line and not _exempt(line, "W291", "W293"):
             problems.append(f"{path}:{index}: 行尾有多余空白")
-        if "\t" in line:
+        if "\t" in line and not _exempt(line, "W191"):
             problems.append(f"{path}:{index}: 使用了 Tab 缩进")
 
     if source and not source.endswith("\n"):
@@ -109,12 +128,16 @@ def check_file(path: pathlib.Path) -> list[str]:
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ExceptHandler) and node.type is None:
-            problems.append(f"{path}:{node.lineno}: 裸 except（应指明异常类型）")
+            line = lines[node.lineno - 1] if 0 < node.lineno <= len(lines) else ""
+            if not _exempt(line, "E722"):
+                problems.append(f"{path}:{node.lineno}: 裸 except（应指明异常类型）")
 
     used = _collect_used_names(tree)
     for name, lineno in _collect_imports(tree):
         if name not in used:
-            problems.append(f"{path}:{lineno}: 未使用的 import「{name}」")
+            line = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
+            if not _exempt(line, "F401"):
+                problems.append(f"{path}:{lineno}: 未使用的 import「{name}」")
 
     try:
         py_compile.compile(str(path), doraise=True, cfile=None)

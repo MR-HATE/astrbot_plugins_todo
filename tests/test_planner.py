@@ -286,7 +286,8 @@ def test_filter_tasks_scopes():
         _graph_task("已完成", status="completed", due=days(-1)),
         _graph_task("没日期"),
     ]
-    names = lambda scope: [t["title"] for t in P.filter_tasks(data, scope, "Asia/Shanghai")]  # noqa: E731
+    def names(scope: str) -> list[str]:
+        return [t["title"] for t in P.filter_tasks(data, scope, "Asia/Shanghai")]
     assert set(names("pending")) == {"逾期", "今天"}
     assert names("overdue") == ["逾期"]
     assert names("today") == ["今天"]
