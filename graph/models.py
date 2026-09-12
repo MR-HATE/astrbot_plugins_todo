@@ -256,3 +256,134 @@ CONFIRM_PARAMETERS: dict = {
     },
     "required": ["action"],
 }
+
+LIST_TASKS_PARAMETERS: dict = {
+    "type": "object",
+    "properties": {
+        "scope": {
+            "type": "string",
+            "enum": ["pending", "today", "overdue", "upcoming", "completed", "all"],
+            "description": (
+                "要看的范围。pending（默认）= 未完成且截止日期是今天或已逾期，"
+                "回答「今天还有什么要做的」用它；today=仅今天到期；overdue=已逾期；"
+                "upcoming=未来 7 天内到期；completed=已完成的；all=全部。"
+            ),
+        },
+        "list_name": {
+            "type": "string",
+            "description": "只看某个列表；留空则汇总用户所有列表。",
+        },
+        "limit": {
+            "type": "integer",
+            "description": "最多返回多少条，默认 30。",
+        },
+    },
+    "required": [],
+}
+
+#: 定位一条任务的公共参数（增删改类工具共用）
+_TASK_LOCATOR_PROPS: dict = {
+    "query": {
+        "type": "string",
+        "description": (
+            "用于定位任务的标题或关键词（模糊匹配，忽略大小写）。"
+            "例如用户说「把交房租改到周五」，query 就是「交房租」。"
+        ),
+    },
+    "task_id": {
+        "type": "string",
+        "description": "任务 ID。之前查询结果里给过 id 时可以直接用，比标题更精确。",
+    },
+    "list_name": {
+        "type": "string",
+        "description": "限定在某个列表里查找；留空则搜索用户所有列表。",
+    },
+}
+
+UPDATE_TASK_PARAMETERS: dict = {
+    "type": "object",
+    "properties": {
+        **_TASK_LOCATOR_PROPS,
+        "title": {"type": "string", "description": "新的标题。不改标题就留空。"},
+        "due_date": {
+            "type": "string",
+            "description": "新的截止日期，YYYY-MM-DD（相对说法如「周五」也可以）。不改就留空。",
+        },
+        "due_time": {"type": "string", "description": "新的截止时刻 HH:MM。不改就留空。"},
+        "importance": {
+            "type": "string",
+            "enum": list(VALID_IMPORTANCE),
+            "description": "新的优先级。不改就留空。",
+        },
+        "status": {
+            "type": "string",
+            "enum": ["notStarted", "inProgress", "completed", "waitingOnOthers", "deferred"],
+            "description": "新的状态。标记完成请优先用 ms_todo_complete_task。不改就留空。",
+        },
+        "note": {"type": "string", "description": "新的备注（会覆盖原备注）。"},
+        "clear_due": {
+            "type": "boolean",
+            "description": "设为 true 清除截止日期（用户说「不用设截止时间了」时）。",
+        },
+    },
+    "required": [],
+}
+
+COMPLETE_TASK_PARAMETERS: dict = {
+    "type": "object",
+    "properties": {
+        **_TASK_LOCATOR_PROPS,
+        "completed": {
+            "type": "boolean",
+            "description": "true（默认）= 标记完成；false = 取消完成（重新打开）。",
+        },
+    },
+    "required": [],
+}
+
+DELETE_TASK_PARAMETERS: dict = {
+    "type": "object",
+    "properties": {
+        **_TASK_LOCATOR_PROPS,
+        "confirmed": {
+            "type": "boolean",
+            "description": (
+                "**第一次调用必须留空或 false**：工具会返回「将删除哪些」的清单等用户确认；"
+                "用户确认后再用 confirmed=true 调用一次才真正删除。删除不可恢复。"
+            ),
+        },
+    },
+    "required": [],
+}
+
+CHECKLIST_PARAMETERS: dict = {
+    "type": "object",
+    "properties": {
+        **_TASK_LOCATOR_PROPS,
+        "items": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "要追加到该任务的子步骤（checklist）文本列表。",
+        },
+    },
+    "required": ["items"],
+}
+
+DELETE_LIST_PARAMETERS: dict = {
+    "type": "object",
+    "properties": {
+        "list_name": {
+            "type": "string",
+            "description": "要删除的列表名（必填）。例如用户说「把上海出差那个列表删掉」，就填「上海出差」。",
+        },
+        "confirmed": {
+            "type": "boolean",
+            "description": (
+                "**第一次调用必须留空或 false**：工具会返回「将删除哪个列表、里面有多少任务」；"
+                "把这段给用户看，用户确认后再用 confirmed=true 调用一次才真正删除。"
+                "整个列表和里面的任务都会消失，不可恢复。"
+            ),
+        },
+    },
+    "required": ["list_name"],
+}

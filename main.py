@@ -36,13 +36,24 @@ from .graph import (
     TodoError,
     apply_seen,
     dedupe_batch,
+    filter_tasks,
     local_today,
     normalize_tasks,
     plan_expired,
     render_import_result,
     render_preview,
+    render_task_list,
+    sort_tasks,
 )
-from .graph.models import clean_text
+from .graph.models import NOTE_MAX, TITLE_MAX, clean_text
+from .graph.planner import (
+    TASK_STATUS_ICONS,
+    format_due,
+    normalize_important,
+    resolve_date,
+    resolve_time,
+    task_due,
+)
 from .tools import TOOL_CLASSES
 
 PLUGIN_NAME = "astrbot_plugin_todo"
@@ -52,6 +63,10 @@ USER_AGENT = "astrbot-plugin-todo/0.1.0"
 _IMPORT_CONCURRENCY = 3
 #: 幂等记录保留条数上限（按列表维度）
 _SEEN_MAX = 500
+#: 查询待办时最多同时读取多少个列表（防止列表特别多时打爆接口）
+_MAX_LISTS_PER_QUERY = 10
+#: 查询范围白名单
+_VALID_SCOPES = frozenset({"pending", "today", "overdue", "upcoming", "completed", "all"})
 
 #: 注入标记：同一次请求的工具循环会复用同一个 ProviderRequest，用它保证只追加一次
 _RULES_MARKER = "<!-- astrbot-plugin-todo:rules -->"
@@ -75,7 +90,15 @@ _TODO_RULES_PROMPT = f"""{_RULES_MARKER}
    不要把一个动作拆成多个任务。
 4. **别误触发**：闲聊、普通提问不要建任务；用户意图不明时先追问，不要臆造待办。
 5. **如实回报**：预览里的「⚠️ 需要留意」必须转达用户；工具报错就说失败，不要假装成功。
-6. 当前版本只支持**导入**与**查看列表**；查询待办条目、修改、完成、删除尚未提供。"""
+6. **读取待办用 `ms_todo_list_tasks`**：用户问「今天还有什么要做的」「上周的事做完没」时用它，
+   它返回**真实的完成状态**（⬜ 未完成 / 🔄 进行中 / ✅ 已完成 / ⏳ 等待他人 / 💤 已推迟）；
+   默认范围是「未完成且今天到期或已逾期」。这是只读操作。
+7. **改动已有待办**：改期/改优先级/改标题用 `ms_todo_update_task`；勾完成用
+   `ms_todo_complete_task`；加子步骤用 `ms_todo_add_checklist_items`。
+   定位不到唯一一条时，工具会返回候选清单——**要让用户选，不要自己猜**。
+8. **删除是两阶段**：`ms_todo_delete_task`（删一条）和 `ms_todo_delete_list`（删整个列表，
+   连同里面的任务）第一次都只返回「将删除什么」，把清单给用户看，用户确认后再用
+   `confirmed=true` 调用一次。删除不可恢复，绝不要跳过一次确认。"""
 
 _EXTRACT_SYSTEM_PROMPT = """你是一个待办抽取器。把用户的话拆成结构化的待办事项。
 
@@ -283,6 +306,585 @@ class TodoPlugin(Star):
             suffix = "（默认列表）" if wellknown == "defaultList" else ""
             lines.append(f"- {name}{suffix}  `{item.get('id')}`")
         return "\n".join(lines)
+
+    # -------------------------------------------------------- 查询待办（M4）
+
+    @staticmethod
+    def _normalize_scope(raw: object) -> str:
+        scope = clean_text(raw, 16).lower()
+        return scope if scope in _VALID_SCOPES else "pending"
+
+    async def _target_lists(self, aid: str, list_name: str) -> list[dict] | None:
+        """确定要查询的列表；指定了不存在的列表时返回 None。"""
+        if list_name:
+            found = await self.graph.find_task_list(aid, list_name)
+            return [found] if found else None
+        return await self.graph.list_task_lists(aid)
+
+    async def _collect_tasks(
+        self, aid: str, lists: list[dict]
+    ) -> tuple[list[dict], list[str]]:
+        """并发读取多个列表的任务，返回 (任务列表, 错误说明)。"""
+        semaphore = asyncio.Semaphore(_IMPORT_CONCURRENCY)
+        collected: list[dict] = []
+        errors: list[str] = []
+
+        async def fetch(item: dict) -> None:
+            list_id = str(item.get("id") or "")
+            if not list_id:
+                return
+            async with semaphore:
+                try:
+                    tasks = await self.graph.list_tasks(aid, list_id)
+                except TodoError as exc:
+                    errors.append(f"{item.get('displayName')}：{exc.user_message}")
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("读取待办失败")
+                    errors.append(f"{item.get('displayName')}：{exc!s}")
+                    return
+            name = str(item.get("displayName") or "")
+            for task in tasks:
+                task["_list_name"] = name  # 汇总展示时标明来源列表
+            collected.extend(tasks)
+
+        await asyncio.gather(*(fetch(item) for item in lists[:_MAX_LISTS_PER_QUERY]))
+        return collected, errors
+
+    async def tool_list_tasks(self, event: AstrMessageEvent, args: dict) -> str:
+        """读取待办及其完成状态（只读）。"""
+        denied = self._check_allowed(event)
+        if denied:
+            return denied
+
+        aid = self.account_id(event)
+        status = await self.auth.status(aid)
+        if not status.bound:
+            return "还没有绑定 Microsoft 账号。请先发送 /todo login 完成绑定。"
+
+        args = args or {}
+        scope = self._normalize_scope(args.get("scope"))
+        list_name = clean_text(args.get("list_name"), 100)
+        try:
+            limit = int(args.get("limit") or 30)
+        except (TypeError, ValueError):
+            limit = 30
+        limit = max(1, min(limit, 100))
+
+        tz = self._tz()
+        try:
+            lists = await self._target_lists(aid, list_name)
+        except TodoError as exc:
+            return exc.user_message
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("获取待办列表失败")
+            return f"获取待办列表失败：{exc!s}"
+
+        if lists is None:
+            return f"没找到名为「{list_name}」的列表。发送 /todo lists 看看有哪些列表。"
+        if not lists:
+            return "你的 Microsoft To Do 里还没有任何列表。"
+
+        collected, errors = await self._collect_tasks(aid, lists)
+        tasks = sort_tasks(filter_tasks(collected, scope, tz))
+
+        label = f"列表「{list_name}」" if list_name else "全部列表"
+        note = ""
+        if errors:
+            note = "⚠️ 部分列表读取失败：" + "；".join(errors[:3])
+        if len(lists) > _MAX_LISTS_PER_QUERY:
+            more = f"（列表较多，本次只读取了前 {_MAX_LISTS_PER_QUERY} 个）"
+            note = f"{note}\n{more}".strip() if note else more
+
+        return render_task_list(
+            tasks, scope=scope, list_label=label, tz_name=tz, max_show=limit, note=note
+        )
+
+    # -------------------------------------------------------- 增删改（M4）
+
+    @staticmethod
+    def _pending_delete_key(aid: str) -> str:
+        return f"pending_delete::{aid}"
+
+    async def _save_pending_delete(
+        self, aid: str, entries: list[dict], *, kind: str = "task"
+    ) -> None:
+        await self.put_kv_data(
+            self._pending_delete_key(aid),
+            {"kind": kind, "items": entries, "created_at": time.time()},
+        )
+
+    async def _load_pending_delete(self, aid: str) -> dict | None:
+        data = await self.get_kv_data(self._pending_delete_key(aid), None)
+        return dict(data) if isinstance(data, dict) else None
+
+    async def _locate_tasks(
+        self, aid: str, args: dict
+    ) -> tuple[list[tuple[dict, dict]], str | None]:
+        """定位要操作的任务，返回 ([(列表, 任务)], 错误文案)。"""
+        task_id = clean_text(args.get("task_id"), 300)
+        query = clean_text(args.get("query"), 100)
+        list_name = clean_text(args.get("list_name"), 100)
+
+        if not task_id and not query:
+            return [], "需要提供 query（标题关键词）或 task_id 才能定位任务。"
+
+        try:
+            lists = await self._target_lists(aid, list_name)
+        except TodoError as exc:
+            return [], exc.user_message
+        if lists is None:
+            return [], f"没找到名为「{list_name}」的列表。发送 /todo lists 看看有哪些列表。"
+        if not lists:
+            return [], "你的 Microsoft To Do 里还没有任何列表。"
+
+        matches: list[tuple[dict, dict]] = []
+        needle = query.casefold()
+
+        for item in lists[:_MAX_LISTS_PER_QUERY]:
+            list_id = str(item.get("id") or "")
+            if not list_id:
+                continue
+            try:
+                tasks = await self.graph.list_tasks(aid, list_id)
+            except TodoError as exc:
+                return [], exc.user_message
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("读取待办失败")
+                return [], f"读取待办失败：{exc!s}"
+
+            for task in tasks:
+                if task_id:
+                    if str(task.get("id")) != task_id:
+                        continue
+                elif needle and needle not in str(task.get("title") or "").casefold():
+                    continue
+                task["_list_id"] = list_id
+                task["_list_name"] = str(item.get("displayName") or "")
+                matches.append((item, task))
+
+        if task_id:
+            if not matches:
+                return [], "没有找到该 task_id 对应的任务（可能已被删除）。"
+            return matches, None
+
+        # 标题完全相等的排最前，方便"就是它"的情况直接命中
+        matches.sort(
+            key=lambda pair: 0
+            if str(pair[1].get("title") or "").strip().casefold() == needle
+            else 1
+        )
+        return matches, None
+
+    @staticmethod
+    def _render_task_matches(matches: list[tuple[dict, dict]], tz_name: str) -> str:
+        """匹配到多条时，列出候选让用户/模型挑一个。"""
+        today = local_today(tz_name)
+        lines = [f"找到 {len(matches)} 个匹配的待办，需要先确定是哪一个："]
+        for index, (_item, task) in enumerate(matches[:10], start=1):
+            icon = TASK_STATUS_ICONS.get(str(task.get("status") or ""), "⬜")
+            due_date, due_time = task_due(task)
+            details = []
+            if due_date:
+                details.append(format_due(due_date, due_time, today))
+            if task.get("_list_name"):
+                details.append(f"列表「{task['_list_name']}」")
+            suffix = f"（{' · '.join(details)}）" if details else ""
+            lines.append(f"{index}. {icon} {task.get('title')}{suffix}  id={task.get('id')}")
+        lines.append("请用户确认是哪一个，然后用它的 id 或更精确的标题重新调用。")
+        return "\n".join(lines)
+
+    def _resolve_one(
+        self, matches: list[tuple[dict, dict]], tz_name: str
+    ) -> tuple[dict | None, str | None]:
+        if not matches:
+            return None, "没有找到匹配的待办。可以先用 ms_todo_list_tasks 查一下准确的标题。"
+        if len(matches) > 1:
+            return None, self._render_task_matches(matches, tz_name)
+        return matches[0][1], None
+
+    def _build_task_update(
+        self, args: dict, task: dict, tz_name: str
+    ) -> tuple[dict, list[str]]:
+        """根据工具参数拼 PATCH 请求体，返回 (payload, 提示)。"""
+        today = local_today(tz_name)
+        payload: dict = {}
+        notes: list[str] = []
+
+        title = clean_text(args.get("title"), TITLE_MAX)
+        if title:
+            payload["title"] = title
+
+        if "importance" in args and str(args.get("importance") or "").strip():
+            importance, warning = normalize_important(args.get("importance"))
+            payload["importance"] = importance
+            if warning:
+                notes.append(warning)
+
+        if "status" in args and str(args.get("status") or "").strip():
+            status = clean_text(args.get("status"), 32)
+            if status in TASK_STATUS_ICONS:
+                payload["status"] = status
+            else:
+                notes.append(f"状态「{status}」不在允许范围内，已忽略")
+
+        if "note" in args and args.get("note") is not None:
+            payload["body"] = {
+                "content": clean_text(args.get("note"), NOTE_MAX),
+                "contentType": "text",
+            }
+
+        if args.get("clear_due"):
+            payload["dueDateTime"] = None
+        elif str(args.get("due_date") or "").strip():
+            day, warning = resolve_date(args.get("due_date"), today)
+            if not day:
+                notes.append(warning or "无法识别新的截止日期，已忽略")
+            else:
+                clock = None
+                if str(args.get("due_time") or "").strip():
+                    clock, time_warning = resolve_time(args.get("due_time"))
+                    if time_warning:
+                        notes.append(time_warning)
+                if not clock:
+                    _existing_date, existing_time = task_due(task)
+                    clock = existing_time or "00:00"
+                payload["dueDateTime"] = {
+                    "dateTime": f"{day}T{clock}:00",
+                    "timeZone": tz_name,
+                }
+        elif str(args.get("due_time") or "").strip():
+            # 只改时刻：保留原日期
+            existing_date, _existing_time = task_due(task)
+            clock, warning = resolve_time(args.get("due_time"))
+            if existing_date and clock:
+                payload["dueDateTime"] = {
+                    "dateTime": f"{existing_date}T{clock}:00",
+                    "timeZone": tz_name,
+                }
+            elif warning:
+                notes.append(warning)
+
+        return payload, notes
+
+    async def tool_update_task(self, event: AstrMessageEvent, args: dict) -> str:
+        denied = self._check_allowed(event)
+        if denied:
+            return denied
+        aid = self.account_id(event)
+        status = await self.auth.status(aid)
+        if not status.bound:
+            return "还没有绑定 Microsoft 账号。请先发送 /todo login 完成绑定。"
+
+        args = args or {}
+        tz = self._tz()
+        matches, error = await self._locate_tasks(aid, args)
+        if error:
+            return error
+        task, problem = self._resolve_one(matches, tz)
+        if problem:
+            return problem
+        assert task is not None
+
+        payload, notes = self._build_task_update(args, task, tz)
+        if not payload:
+            return "没有识别出要修改的内容。请说明改什么（标题/截止时间/优先级/备注）。"
+
+        list_id = str(task.get("_list_id") or "")
+        task_id = str(task.get("id") or "")
+        try:
+            await self.graph.update_task(aid, list_id, task_id, payload)
+        except TodoError as exc:
+            return exc.user_message
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("修改待办失败")
+            return f"修改失败：{exc!s}"
+
+        changed = []
+        if "title" in payload:
+            changed.append(f"标题改为「{payload['title']}」")
+        if "dueDateTime" in payload:
+            if payload["dueDateTime"] is None:
+                changed.append("清除截止时间")
+            else:
+                stamp = str(payload["dueDateTime"]["dateTime"])
+                changed.append(f"截止改为 {stamp[:10]} {stamp[11:16]}")
+        if "importance" in payload:
+            changed.append(f"优先级改为 {payload['importance']}")
+        if "status" in payload:
+            changed.append(f"状态改为 {payload['status']}")
+        if "body" in payload:
+            changed.append("备注已更新")
+
+        lines = [f"✅ 已修改「{task.get('title')}」：", "- " + "；".join(changed)]
+        if notes:
+            lines.append("提示：" + "；".join(notes))
+        return "\n".join(lines)
+
+    async def tool_complete_task(self, event: AstrMessageEvent, args: dict) -> str:
+        denied = self._check_allowed(event)
+        if denied:
+            return denied
+        aid = self.account_id(event)
+        status = await self.auth.status(aid)
+        if not status.bound:
+            return "还没有绑定 Microsoft 账号。请先发送 /todo login 完成绑定。"
+
+        args = args or {}
+        tz = self._tz()
+        matches, error = await self._locate_tasks(aid, args)
+        if error:
+            return error
+        task, problem = self._resolve_one(matches, tz)
+        if problem:
+            return problem
+        assert task is not None
+
+        completed = args.get("completed")
+        completed = True if completed is None else bool(completed)
+        new_status = "completed" if completed else "notStarted"
+
+        try:
+            await self.graph.update_task(
+                aid,
+                str(task.get("_list_id") or ""),
+                str(task.get("id") or ""),
+                {"status": new_status},
+            )
+        except TodoError as exc:
+            return exc.user_message
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("更新完成状态失败")
+            return f"更新失败：{exc!s}"
+
+        verb = "已完成" if completed else "已重新打开"
+        return f"{'✅' if completed else '⬜'} 「{task.get('title')}」{verb}。"
+
+    async def tool_delete_task(self, event: AstrMessageEvent, args: dict) -> str:
+        denied = self._check_allowed(event)
+        if denied:
+            return denied
+        aid = self.account_id(event)
+        status = await self.auth.status(aid)
+        if not status.bound:
+            return "还没有绑定 Microsoft 账号。请先发送 /todo login 完成绑定。"
+
+        args = args or {}
+        if bool(args.get("confirmed")):
+            return await self._execute_pending_delete(aid)
+
+        tz = self._tz()
+        matches, error = await self._locate_tasks(aid, args)
+        if error:
+            return error
+        task, problem = self._resolve_one(matches, tz)
+        if problem:
+            return problem
+        assert task is not None
+
+        entry = {
+            "task_id": str(task.get("id") or ""),
+            "list_id": str(task.get("_list_id") or ""),
+            "title": str(task.get("title") or ""),
+            "list_name": str(task.get("_list_name") or ""),
+        }
+        await self._save_pending_delete(aid, [entry])
+
+        due_date, due_time = task_due(task)
+        detail = f"（截止 {format_due(due_date, due_time, local_today(tz))}）" if due_date else ""
+        return (
+            f"⚠️ 即将删除 1 项，删除后无法恢复：\n"
+            f"- {entry['title']}{detail} · 列表「{entry['list_name']}」\n"
+            '请用户确认；确认后调用 ms_todo_delete_task(confirmed=true) 才会真正删除。'
+        )
+
+    async def tool_delete_list(self, event: AstrMessageEvent, args: dict) -> str:
+        """删除整个列表（连同其中的任务），两阶段确认。"""
+        denied = self._check_allowed(event)
+        if denied:
+            return denied
+        aid = self.account_id(event)
+        status = await self.auth.status(aid)
+        if not status.bound:
+            return "还没有绑定 Microsoft 账号。请先发送 /todo login 完成绑定。"
+
+        args = args or {}
+        if bool(args.get("confirmed")):
+            return await self._execute_pending_delete(aid)
+
+        list_name = clean_text(args.get("list_name") or args.get("query"), 100)
+        if not list_name:
+            return "请说明要删除哪个列表。可以先用 ms_todo_list_task_lists 看看有哪些列表。"
+
+        try:
+            lists = await self.graph.list_task_lists(aid)
+        except TodoError as exc:
+            return exc.user_message
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("获取待办列表失败")
+            return f"获取待办列表失败：{exc!s}"
+
+        wanted = list_name.casefold()
+        matched = [item for item in lists if str(item.get("displayName") or "").strip().casefold() == wanted]
+        if not matched:
+            partial = [item for item in lists if wanted in str(item.get("displayName") or "").casefold()]
+            if len(partial) == 1:
+                matched = partial
+            elif len(partial) > 1:
+                names = "、".join(f"「{item.get('displayName')}」" for item in partial[:10])
+                return f"找到多个相近的列表：{names}。请说明要删哪一个，或用 /todo lists 查看完整列表。"
+            else:
+                return f"没找到名为「{list_name}」的列表。发送 /todo lists 看看有哪些列表。"
+
+        target = matched[0]
+        if str(target.get("wellknownListName") or "") == "defaultList":
+            return (
+                f"「{target.get('displayName')}」是 Microsoft To Do 的默认列表，"
+                "客户端不允许删除它。可以先把里面的任务清掉，或用别的列表。"
+            )
+
+        list_id = str(target.get("id") or "")
+        display = str(target.get("displayName") or list_name)
+        try:
+            tasks = await self.graph.list_tasks(aid, list_id)
+        except Exception as exc:  # noqa: BLE001 - 数不出来也不该阻止确认流程
+            logger.warning("统计列表任务数失败: %s", exc)
+            tasks = []
+        pending_count = sum(
+            1 for task in tasks if str(task.get("status") or "") != "completed"
+        )
+
+        await self._save_pending_delete(
+            aid,
+            [{"list_id": list_id, "list_name": display, "task_count": len(tasks)}],
+            kind="list",
+        )
+
+        detail = f"该列表下有 {len(tasks)} 个任务" if tasks else "该列表下没有任务"
+        if pending_count:
+            detail += f"（其中 {pending_count} 个未完成）"
+        return (
+            f"⚠️ 即将删除整个列表「{display}」，{detail}。\n"
+            "列表和里面的任务会一起消失，且无法恢复。\n"
+            '请用户确认；确认后调用 ms_todo_delete_list(confirmed=true) 才会真正删除。'
+        )
+
+    async def _execute_pending_delete(self, aid: str) -> str:
+        pending = await self._load_pending_delete(aid)
+        if not pending:
+            return "没有待确认的删除操作。请先说明要删哪一项。"
+        if plan_expired(float(pending.get("created_at") or 0), now=time.time()):
+            await self.delete_kv_data(self._pending_delete_key(aid))
+            return f"上次的删除确认已超过 {PENDING_TTL // 60} 分钟，为安全起见没有执行。请重新确认要删哪一项。"
+
+        items = [item for item in (pending.get("items") or []) if isinstance(item, dict)]
+        kind = str(pending.get("kind") or "task")
+        deleted: list[str] = []
+        failed: list[str] = []
+
+        if kind == "list":
+            for item in items:
+                list_id = str(item.get("list_id") or "")
+                name = str(item.get("list_name") or "")
+                try:
+                    await self.graph.delete_task_list(aid, list_id)
+                except TodoError as exc:
+                    failed.append(f"{name}：{exc.user_message}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("删除列表失败")
+                    failed.append(f"{name}：{exc!s}")
+                else:
+                    deleted.append(name)
+                    # 列表没了，它的幂等记录也没有意义
+                    await self.delete_kv_data(self._seen_key(list_id))
+            await self.delete_kv_data(self._pending_delete_key(aid))
+            lines = (
+                [f"🗑 已删除列表：" + "、".join(f"「{name}」" for name in deleted)]
+                if deleted
+                else ["没有删除任何列表。"]
+            )
+            if failed:
+                lines.append("❌ 失败：" + "；".join(failed))
+            return "\n".join(lines)
+
+        for item in items:
+            try:
+                await self.graph.delete_task(
+                    aid, str(item.get("list_id") or ""), str(item.get("task_id") or "")
+                )
+            except TodoError as exc:
+                failed.append(f"{item.get('title')}：{exc.user_message}")
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("删除待办失败")
+                failed.append(f"{item.get('title')}：{exc!s}")
+            else:
+                deleted.append(str(item.get("title") or ""))
+                # 顺手清掉幂等记录，避免以后同一条被当成"已导入过"
+                await self._forget_seen(
+                    aid, str(item.get("list_id") or ""), str(item.get("task_id") or "")
+                )
+
+        await self.delete_kv_data(self._pending_delete_key(aid))
+        lines = [f"🗑 已删除 {len(deleted)} 项：" + "、".join(deleted)] if deleted else ["没有删除任何待办。"]
+        if failed:
+            lines.append("❌ 失败：" + "；".join(failed))
+        return "\n".join(lines)
+
+    async def _forget_seen(self, aid: str, list_id: str, task_id: str) -> None:
+        """删除任务后同步清掉幂等表里的对应记录。"""
+        if not list_id or not task_id:
+            return
+        seen = await self._load_seen(list_id)
+        removed = [key for key, value in seen.items() if str((value or {}).get("task_id")) == task_id]
+        if not removed:
+            return
+        for key in removed:
+            seen.pop(key, None)
+        await self._save_seen(list_id, seen)
+
+    async def tool_add_checklist_items(self, event: AstrMessageEvent, args: dict) -> str:
+        denied = self._check_allowed(event)
+        if denied:
+            return denied
+        aid = self.account_id(event)
+        status = await self.auth.status(aid)
+        if not status.bound:
+            return "还没有绑定 Microsoft 账号。请先发送 /todo login 完成绑定。"
+
+        args = args or {}
+        items = [clean_text(item, 250) for item in (args.get("items") or []) if item]
+        items = [item for item in items if item]
+        if not items:
+            return "没有收到要添加的子步骤。"
+
+        tz = self._tz()
+        matches, error = await self._locate_tasks(aid, args)
+        if error:
+            return error
+        task, problem = self._resolve_one(matches, tz)
+        if problem:
+            return problem
+        assert task is not None
+
+        list_id = str(task.get("_list_id") or "")
+        task_id = str(task.get("id") or "")
+        added: list[str] = []
+        failed: list[str] = []
+        for text in items:
+            try:
+                await self.graph.add_checklist_item(aid, list_id, task_id, text)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("添加子步骤失败: %s", exc)
+                failed.append(text)
+            else:
+                added.append(text)
+
+        lines = []
+        if added:
+            lines.append(f"✅ 已给「{task.get('title')}」添加 {len(added)} 个子步骤：" + " / ".join(added))
+        if failed:
+            lines.append("❌ 以下子步骤添加失败：" + " / ".join(failed))
+        return "\n".join(lines) or "没有添加任何子步骤。"
 
     # -------------------------------------------------------- 导入链路（M2）
 
@@ -646,6 +1248,26 @@ class TodoPlugin(Star):
         """列出 Microsoft To Do 中已有的列表（同时用于验证连通性）"""
         yield event.plain_result(await self.tool_list_task_lists(event))
 
+    @todo.command("today")
+    async def todo_today(self, event: AstrMessageEvent):
+        """查看今天还没做完的待办（含已逾期的）"""
+        yield event.plain_result(await self.tool_list_tasks(event, {"scope": "pending"}))
+
+    @todo.command("done")
+    async def todo_done(self, event: AstrMessageEvent, content: str = ""):
+        """把匹配的待办标记为已完成，例：/todo done 交房租"""
+        yield event.plain_result(await self.tool_complete_task(event, {"query": content}))
+
+    @todo.command("del")
+    async def todo_del(self, event: AstrMessageEvent, content: str = ""):
+        """删除一条待办（需再发一次 /todo confirm 确认），例：/todo del 买菜"""
+        yield event.plain_result(await self.tool_delete_task(event, {"query": content}))
+
+    @todo.command("dellist")
+    async def todo_dellist(self, event: AstrMessageEvent, content: str = ""):
+        """删除整个列表及其中的任务（需再发一次 /todo confirm 确认），例：/todo dellist 上海出差"""
+        yield event.plain_result(await self.tool_delete_list(event, {"list_name": content}))
+
     @todo.command("import")
     async def todo_import(self, event: AstrMessageEvent, content: str = ""):
         """把一段自然语言计划整理成待办并生成预览，例：/todo import 下周去上海出差，周三前订酒店"""
@@ -653,8 +1275,12 @@ class TodoPlugin(Star):
 
     @todo.command("confirm")
     async def todo_confirm(self, event: AstrMessageEvent):
-        """确认并写入上一次生成的待办预览"""
-        yield event.plain_result(await self._confirm_plan(self.account_id(event), ""))
+        """确认上一次的待办预览；若刚发起过删除，则确认执行删除"""
+        aid = self.account_id(event)
+        if await self._load_pending_delete(aid):
+            yield event.plain_result(await self._execute_pending_delete(aid))
+            return
+        yield event.plain_result(await self._confirm_plan(aid, ""))
 
     @todo.command("cancel")
     async def todo_cancel(self, event: AstrMessageEvent):
@@ -662,7 +1288,11 @@ class TodoPlugin(Star):
         aid = self.account_id(event)
         plan = await self._load_pending(aid)
         if plan is None:
-            yield event.plain_result("当前没有待确认的清单。")
+            if await self._load_pending_delete(aid):
+                await self.delete_kv_data(self._pending_delete_key(aid))
+                yield event.plain_result("已取消这次删除，没有删除任何待办。")
+                return
+            yield event.plain_result("当前没有待确认的清单或删除操作。")
             return
         await self._clear_pending(aid)
         yield event.plain_result(f"已放弃这次清单（{len(plan.tasks)} 项），没有写入 Microsoft To Do。")

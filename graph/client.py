@@ -194,6 +194,10 @@ class GraphClient:
         data = await self.post(aid, "/me/todo/lists", json={"displayName": name})
         return data if isinstance(data, dict) else {}
 
+    async def delete_task_list(self, aid: str, list_id: str) -> None:
+        """删除整个列表（连同其中的任务）。Graph 返回 204。"""
+        await self.delete(aid, f"/me/todo/lists/{list_id}")
+
     async def ensure_task_list(self, aid: str, name: str, *, create: bool = True) -> dict | None:
         """找到或创建目标列表。
 
@@ -208,9 +212,43 @@ class GraphClient:
 
     # ------------------------------------------------------------------ 任务
 
+    async def list_tasks(
+        self,
+        aid: str,
+        list_id: str,
+        *,
+        top: int = 100,
+        max_pages: int = 3,
+    ) -> list[dict]:
+        """读取某个列表里的任务（自动跟分页，最多 ``max_pages`` 页）。"""
+        items: list[dict] = []
+        path: str | None = f"/me/todo/lists/{list_id}/tasks?$top={max(1, min(top, 200))}"
+        for _ in range(max(1, max_pages)):
+            if not path:
+                break
+            data = await self.get(aid, path)
+            if not isinstance(data, dict):
+                break
+            value = data.get("value")
+            if isinstance(value, list):
+                items.extend(item for item in value if isinstance(item, dict))
+            next_link = data.get("@odata.nextLink")
+            path = str(next_link) if next_link else None
+        return items
+
     async def create_task(self, aid: str, list_id: str, payload: dict) -> dict:
         data = await self.post(aid, f"/me/todo/lists/{list_id}/tasks", json=payload)
         return data if isinstance(data, dict) else {}
+
+    async def update_task(self, aid: str, list_id: str, task_id: str, payload: dict) -> dict:
+        """PATCH 一条任务。``payload`` 里显式给 null 可以清空字段（如截止日期）。"""
+        data = await self.patch(
+            aid, f"/me/todo/lists/{list_id}/tasks/{task_id}", json=payload
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def delete_task(self, aid: str, list_id: str, task_id: str) -> None:
+        await self.delete(aid, f"/me/todo/lists/{list_id}/tasks/{task_id}")
 
     async def add_checklist_item(
         self, aid: str, list_id: str, task_id: str, display_name: str

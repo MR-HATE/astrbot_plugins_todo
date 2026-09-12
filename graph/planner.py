@@ -549,24 +549,32 @@ def apply_seen(tasks: list[TaskDraft], list_name: str, seen: dict) -> tuple[list
 
 # ---------------------------------------------------------------- 渲染
 
-def format_due(due_date: str | None, due_time: str | None, today: date) -> str:
+def format_due(
+    due_date: str | None,
+    due_time: str | None,
+    today: date,
+    *,
+    relative: bool = True,
+) -> str:
+    """格式化截止时间。
+
+    ``relative=False`` 时不加「今天/明天/已逾期 N 天」这类相对说明——
+    已完成的任务用它是为了避免出现"✅ 已完成 · 已逾期 2 天"这种自相矛盾的文案。
+    """
     if not due_date:
         return "未设截止"
     try:
         value = date.fromisoformat(due_date)
     except ValueError:
         return due_date
-    delta = (value - today).days
-    relative = {
-        0: "今天",
-        1: "明天",
-        2: "后天",
-    }.get(delta)
-    if relative is None and delta < 0:
-        relative = f"已逾期 {abs(delta)} 天"
     label = f"{due_date}（{weekday_cn(value)}）"
     if relative:
-        label = f"{relative} · {label}"
+        delta = (value - today).days
+        prefix = {0: "今天", 1: "明天", 2: "后天"}.get(delta)
+        if prefix is None and delta < 0:
+            prefix = f"已逾期 {abs(delta)} 天"
+        if prefix:
+            label = f"{prefix} · {label}"
     if due_time:
         label += f" {due_time}"
     return label
@@ -641,6 +649,156 @@ def render_import_result(
             lines.append(f"- {task.title}：{reason}")
     if not created and not skipped and not failed:
         lines.append("（没有需要写入的条目）")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 任务查询
+
+TASK_STATUS_ICONS = {
+    "completed": "✅",
+    "inProgress": "🔄",
+    "waitingOnOthers": "⏳",
+    "deferred": "💤",
+    "notStarted": "⬜",
+}
+
+_SCOPE_LABELS = {
+    "pending": "未完成 · 今天到期或已逾期",
+    "today": "今天到期",
+    "overdue": "已逾期",
+    "upcoming": "未来 7 天",
+    "completed": "已完成",
+    "all": "全部",
+}
+
+_IMPORTANCE_RANK = {"high": 0, "normal": 1, "low": 2}
+
+
+def normalize_task_status(raw: object) -> str:
+    value = str(raw or "").strip()
+    return value if value in TASK_STATUS_ICONS else "notStarted"
+
+
+def task_due(task: dict) -> tuple[str | None, str | None]:
+    """取出截止时间，返回 (``YYYY-MM-DD``, ``HH:MM``)。
+
+    Graph 返回的是 ``dateTimeTimeZone``，形如 ``2026-09-16T18:00:00.0000000``；
+    这里只做字符串切分，避免不同 Python 版本对小数秒位数的解析差异。
+    """
+    value = task.get("dueDateTime")
+    raw = str(value.get("dateTime") or "").strip() if isinstance(value, dict) else ""
+    if len(raw) < 10:
+        return None, None
+    clock = raw[11:16] if len(raw) >= 16 and raw[10] in ("T", " ") else None
+    return raw[:10], clock
+
+
+def _fmt_stamp(value: object, tz_name: str) -> str | None:
+    """把 Graph 的时间戳转成配置时区的 ``YYYY-MM-DD HH:MM``。"""
+    if not isinstance(value, dict):
+        return None
+    raw = str(value.get("dateTime") or "").strip()
+    if not raw:
+        return None
+    cleaned = re.sub(r"\.\d+", "", raw)  # 去掉小数秒，兼容 Python 3.10
+    moment = _try_iso_datetime(cleaned)
+    if moment is None:
+        return raw[:16].replace("T", " ")
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(get_tz(tz_name)).replace(tzinfo=None)
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def filter_tasks(tasks: list[dict], scope: str, tz_name: str) -> list[dict]:
+    """按范围筛选任务。未知 scope 一律按 ``all`` 处理。"""
+    today = local_today(tz_name)
+    horizon = (today + timedelta(days=7)).isoformat()
+    today_str = today.isoformat()
+    picked: list[dict] = []
+
+    for task in tasks:
+        state = normalize_task_status(task.get("status"))
+        due_date, _due_time = task_due(task)
+        done = state == "completed"
+
+        if scope == "completed":
+            if not done:
+                continue
+        elif scope in ("pending", "today", "overdue", "upcoming"):
+            if done:
+                continue
+            if scope == "today" and due_date != today_str:
+                continue
+            if scope == "overdue" and (not due_date or due_date >= today_str):
+                continue
+            if scope == "upcoming" and (not due_date or not (today_str < due_date <= horizon)):
+                continue
+            if scope == "pending" and (not due_date or due_date > today_str):
+                continue
+        picked.append(task)
+    return picked
+
+
+def sort_tasks(tasks: list[dict]) -> list[dict]:
+    """未完成在前；有截止时间的按日期升序，无截止的排最后。"""
+
+    def key(task: dict):
+        due_date, due_time = task_due(task)
+        return (
+            1 if normalize_task_status(task.get("status")) == "completed" else 0,
+            due_date or "9999-99-99",
+            due_time or "99:99",
+            _IMPORTANCE_RANK.get(str(task.get("importance") or "normal"), 1),
+        )
+
+    return sorted(tasks, key=key)
+
+
+def render_task_list(
+    tasks: list[dict],
+    *,
+    scope: str,
+    list_label: str,
+    tz_name: str,
+    max_show: int = 30,
+    note: str = "",
+) -> str:
+    """渲染查询结果。"""
+    today = local_today(tz_name)
+    label = _SCOPE_LABELS.get(scope, scope)
+    head = f"📋 待办 · {list_label} · {label} · 共 {len(tasks)} 项"
+    if not tasks:
+        body = "（没有符合条件的待办）"
+        return f"{head}\n{body}" + (f"\n{note}" if note else "")
+
+    lines = [head, ""]
+    for task in tasks[:max_show]:
+        icon = TASK_STATUS_ICONS[normalize_task_status(task.get("status"))]
+        done = normalize_task_status(task.get("status")) == "completed"
+        flag = "🔴 " if str(task.get("importance")) == "high" else ""
+        title = clean_text(task.get("title"), TITLE_MAX) or "(无标题)"
+        lines.append(f"{icon} {flag}{title}")
+
+        details: list[str] = []
+        due_date, due_time = task_due(task)
+        if due_date:
+            # 已完成的任务不写「已逾期」——它已经做完了
+            details.append(f"截止 {format_due(due_date, due_time, today, relative=not done)}")
+        if done:
+            stamp = _fmt_stamp(task.get("completedDateTime"), tz_name)
+            if stamp:
+                details.append(f"完成于 {stamp}")
+        owner_list = task.get("_list_name")
+        if owner_list:
+            details.append(f"列表「{owner_list}」")
+        if details:
+            lines.append("   " + " · ".join(details))
+
+    if len(tasks) > max_show:
+        lines.append(f"…（其余 {len(tasks) - max_show} 项已省略）")
+    if note:
+        lines.append("")
+        lines.append(note)
     return "\n".join(lines)
 
 

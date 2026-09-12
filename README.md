@@ -101,6 +101,34 @@ Microsoft To Do 的 Graph API **只支持委派权限**，因此必须注册一�
 > `require_confirm` 关掉即可（模型整理完直接落库）。
 > 预览有 30 分钟有效期，超时需要重新生成，避免隔天误确认。
 
+### 3. 查询待办与完成情况
+
+直接问即可（模型调用 `ms_todo_list_tasks`，**只读**）：
+
+```
+你: 今天还有什么要做的？
+机器人: 📋 待办 · 全部列表 · 未完成 · 今天到期或已逾期 · 共 3 项
+
+        ⬜ 补交季度报告
+           截止 已逾期 2 天 · 2026-09-10（周四） 09:00 · 列表「工作」
+        ⬜ 🔴 交房租
+           截止 今天 · 2026-09-12（周六） 18:00 · 列表「工作」
+        ⬜ 买菜
+           截止 今天 · 2026-09-12（周六） 00:00 · 列表「生活」
+
+你: 上周的事都完成了吗？
+机器人: 📋 待办 · 全部列表 · 已完成 · 共 1 项
+
+        ✅ 已完成的报销
+           截止 2026-09-11（周五） 09:00 · 完成于 2026-09-11 14:20 · 列表「工作」
+```
+
+查询范围 `scope`：`pending`（默认，未完成且今天到期或逾期）、`today`、`overdue`、
+`upcoming`（未来 7 天）、`completed`、`all`。也可以指定 `list_name` 只看某个列表。
+状态标记：`⬜` 未完成 · `🔄` 进行中 · `✅` 已完成 · `⏳` 等待他人 · `💤` 已推迟。
+
+指令兜底：`/todo today`。
+
 ## 指令与工具对照
 
 | 指令 | LLM 工具 | 说明 |
@@ -109,9 +137,41 @@ Microsoft To Do 的 Graph API **只支持委派权限**，因此必须注册一�
 | `/todo status` | `ms_todo_account_status` | 查询绑定状态 |
 | `/todo logout` | `ms_todo_logout` | 解绑 |
 | `/todo lists` | `ms_todo_list_task_lists` | 列出待办列表 |
+| `/todo today` | `ms_todo_list_tasks` | 读取今天未完成（含逾期）的待办及完成状态 |
 | `/todo import <计划>` | `ms_todo_import_tasks` | 整理成待办并生成预览（`confirmed=false`）或直接写入 |
-| `/todo confirm` | `ms_todo_confirm_import` | 确认并写入预览里的清单 |
-| `/todo cancel` | `ms_todo_confirm_import` | 放弃预览（`action=cancel`） |
+| `/todo confirm` | `ms_todo_confirm_import` / `ms_todo_delete_task` / `ms_todo_delete_list` | 确认预览写入；若刚发起删除，则确认执行删除 |
+| `/todo cancel` | `ms_todo_confirm_import` | 放弃预览或取消待确认的删除（`action=cancel`） |
+| `/todo done <关键词>` | `ms_todo_complete_task` | 把匹配的待办标记为已完成 |
+| `/todo del <关键词>` | `ms_todo_delete_task` | 删除一条待办（需再发一次 `/todo confirm`） |
+| `/todo dellist <列表名>` | `ms_todo_delete_list` | 删除整个列表及其中任务（需再发一次 `/todo confirm`） |
+| （对话即可） | `ms_todo_update_task` | 改期 / 改优先级 / 改标题 / 改备注 / 清除截止时间 |
+| （对话即可） | `ms_todo_add_checklist_items` | 给已有待办追加子步骤 |
+
+改动类操作都能直接说人话，例如：
+
+```
+你: 把交房租改到周五
+机器人: ✅ 已修改「交房租」：- 截止改为 2026-09-18 18:00
+
+你: 交房租做完了
+机器人: ✅ 「交房租」已完成。
+
+你: 删掉买菜那条
+机器人: ⚠️ 即将删除 1 项，删除后无法恢复：
+        - 买菜 · 列表「生活」
+        请确认；确认后才会真正删除。
+你: 确认
+机器人: 🗑 已删除 1 项：买菜
+
+你: 把上海出差那个列表删掉
+机器人: ⚠️ 即将删除整个列表「上海出差」，该列表下有 3 个任务（其中 2 个未完成）。
+        列表和里面的任务会一起消失，且无法恢复。
+        请确认；确认后才会真正删除。
+```
+
+> 匹配到多条时（比如"写周报"和"写季度报告"都含"写"），工具会返回候选清单并让你选，
+> 不会自己挑一个改。删列表会连带删掉里面所有任务，所以确认信息里会先告诉你数量。
+> Microsoft To Do 的**默认列表不能删除**。
 
 ## Skill：让模型更守规矩（可选增强）
 

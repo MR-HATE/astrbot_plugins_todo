@@ -34,6 +34,7 @@ STATUS_FILL = {
     "已完成": DONE_FILL,
     "待验收": DOING_FILL,
     "进行中": DOING_FILL,
+    "已取消": PatternFill("solid", fgColor="EDEDED"),
 }
 
 # ---------------------------------------------------------------- 数据
@@ -79,26 +80,28 @@ PLAN_ROWS: list[list[str]] = [
     ["M3 Skill（Agent 操作手册）", "3.2", "渐进式披露的参考资源",
      "references/time-expressions.md（相对时间/汉字数字时刻/时区规则表与常见坑）、references/examples.md（正例、反例、确认话术）", "skills/ms-todo-import/references/*", "3.1", "已完成", "3"],
     ["M3 Skill（Agent 操作手册）", "3.3", "边界与误触发验证",
-     "闲聊、纯提问、与待办无关的指令不应触发；一次导入只问一个澄清问题；确认前绝不写入（边界用例已写入 examples.md，需真机对话验证）", "测试记录", "3.1, 3.2", "待验收", "2"],
+     "闲聊、纯提问、与待办无关的指令不应触发；一次导入只问一个澄清问题；确认前绝不写入（边界用例已写入 examples.md，真机验证通过）", "测试记录", "3.1, 3.2", "已完成", "2"],
     ["M3 Skill（Agent 操作手册）", "3.4", "验收",
-     "「下周要去上海出差，周三前订酒店」→ 自动走完预览确认并写入；Skill 在 WebUI Skills 页以插件来源只读展示（已用 AstrBot 真实 SkillManager 验证可发现、描述可解析）", "验收记录", "3.1-3.3", "待验收", "1"],
+     "「下周要去上海出差，周三前订酒店」→ 自动走完预览确认并写入；Skill 在 WebUI Skills 页以插件来源只读展示（已用 AstrBot 真实 SkillManager 验证可发现、描述可解析；规则注入钩子已验证幂等）", "验收记录", "3.1-3.3", "已完成", "1"],
 
     ["M3 Skill（Agent 操作手册）", "3.5", "规则兜底注入（不依赖 Skill 正文）",
      "on_llm_request 钩子把精简规则（先预览后写入/不编造日期/拆分粒度/别误触发/如实回报）追加到 system prompt，带标记保证幂等；可用 inject_rules 关闭；内容固定不破坏提示词缓存", "main.py, _conf_schema.json", "M2", "已完成", "2"],
 
     # ---------------- M4
     ["M4 查询、管理与 WebUI", "4.1", "查询类工具",
-     "ms_todo_list_tasks（scope=today/overdue/upcoming/all）；/todo today 指令", "tools/todo_tools.py", "M2", "待开始", "3"],
+     "ms_todo_list_tasks（scope=pending/today/overdue/upcoming/completed/all，含完成状态与完成时间，汇总所有列表或指定列表）；/todo today 指令", "tools/todo_tools.py, graph/planner.py", "M2", "已完成", "3"],
     ["M4 查询、管理与 WebUI", "4.2", "增删改类工具",
-     "ms_todo_update_task / ms_todo_complete_task / ms_todo_delete_task / ms_todo_add_checklist_items；删除类操作二次确认", "tools/todo_tools.py", "4.1", "待开始", "5"],
+     "ms_todo_update_task（改期/优先级/标题/备注/清除截止，支持相对日期）/ ms_todo_complete_task / ms_todo_delete_task（两阶段确认）/ ms_todo_add_checklist_items；按标题模糊定位，匹配多条时返回候选交由用户选择；/todo done、/todo del 指令兜底", "tools/todo_tools.py, main.py", "4.1", "已完成", "5"],
     ["M4 查询、管理与 WebUI", "4.3", "批量与限流优化",
      "POST /$batch 每批 ≤20 个请求；失败分批回退为并发 3 + 429 退避；记录部分失败明细", "graph/client.py", "4.2", "待开始", "4"],
     ["M4 查询、管理与 WebUI", "4.4", "幂等与去重",
      "source_key 写入本地 KV；可选 openTypeExtension（extensionName 仅字母数字下划线）写进任务本身，换机器也不重复", "graph/planner.py", "4.3", "待开始", "4"],
-    ["M4 查询、管理与 WebUI", "4.5", "WebUI 绑定/管理页",
-     "插件 Pages：列出已绑定用户与状态、解绑、修改默认列表、生成授权链接/设备码；页面通过 register_web_api 注册的后端接口读写", "pages/index.html, main.py", "M1", "待开始", "8"],
-    ["M4 查询、管理与 WebUI", "4.6", "WebUI 接口权限校验",
-     "所有 Web API 校验 AstrBot 管理员身份；返回数据不包含 token 明文", "main.py", "4.5", "待开始", "2"],
+    ["M4 查询、管理与 WebUI", "4.5", "WebUI 配置（不需要单独做）",
+     "原计划的插件 Pages 已取消：用户要的「在 WebUI 里配置」由 _conf_schema.json 原生实现（AstrBot 插件配置弹窗），M1 即已交付；官方文档也建议少量配置项优先用 schema 而非 Pages", "-", "M1", "已取消", "0"],
+    ["M4 查询、管理与 WebUI", "4.6", "（随 4.5 取消）",
+     "无需单独的后端权限校验：插件配置弹窗与 WebUI 本身由 AstrBot 的登录态保护", "-", "-", "已取消", "0"],
+    ["M4 查询、管理与 WebUI", "4.7", "删除列表（用户追加需求）",
+     "ms_todo_delete_list：删除整个列表及其任务，两阶段确认（先报告列表内任务数/未完成数）；默认列表（wellknownListName=defaultList）拒绝删除；名称歧义时列出候选；删除后清理该列表的幂等记录；/todo dellist 指令兜底", "tools/todo_tools.py, main.py", "4.2", "已完成", "2"],
 
     # ---------------- M5
     ["M5 定时提醒（复用 AstrBot 内置定时任务）", "5.1", "提醒时间解析",
@@ -172,8 +175,8 @@ MILESTONE_HEADERS = ["里程碑", "名称", "目标", "状态", "预估合计(�
 MILESTONE_ROWS = [
     ["M1", "骨架与授权闭环", "每个用户能各自完成绑定，凭据可持久化并自动续期", "已完成（已验收）", ""],
     ["M2", "导入链路", "自然语言 → 预览 → 确认 → 写入指定列表", "已完成（已验收）", ""],
-    ["M3", "Skill", "Agent 按操作手册稳定完成抽取与确认流程", "已完成（待验收）", ""],
-    ["M4", "查询、管理与 WebUI", "增删改查 + WebUI 绑定管理页 + 批量与幂等", "待开始", ""],
+    ["M3", "Skill", "Agent 按操作手册稳定完成抽取与确认流程", "已完成（已验收）", ""],
+    ["M4", "查询、管理与 WebUI", "增删改查 + 批量与幂等（WebUI 配置由 schema 原生提供，不需要单独开发）", "进行中（4.1/4.2/4.7 已完成）", ""],
     ["M5", "定时提醒", "复用 AstrBot 内置定时任务创建提醒", "待开始", ""],
     ["M6", "测试与发布", "单测/端到端/规范/文档/发布", "待开始", ""],
 ]
