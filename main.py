@@ -68,6 +68,10 @@ PLUGIN_VERSION = "v1.0.0"
 #: 出网请求的 User-Agent，便于 Microsoft 侧排查来源。
 USER_AGENT = f"astrbot-plugin-todo/{PLUGIN_VERSION.lstrip('v')}"
 
+#: AstrBot 定时任务合成事件的平台名（见 core/cron/events.py），
+#: 它不携带真实平台信息，取账号 key 时需要从会话字符串还原。
+_CRON_PLATFORM_NAME = "cron"
+
 #: 支持"机器人主动推送消息"的平台；与 metadata.yaml 的 support_platforms 保持一致。
 #: 其它平台仍会写入 To Do，只是无法由机器人在到点时主动发消息。
 _PUSH_CAPABLE_PLATFORMS = frozenset(
@@ -261,9 +265,40 @@ class TodoPlugin(Star):
         return default if value is None else value
 
     @staticmethod
-    def account_id(event: AstrMessageEvent) -> str:
-        """账号标识：按「平台 + 用户」隔离，保证群聊里每人各自一份凭据。"""
-        return f"{event.get_platform_name()}:{event.get_sender_id()}"
+    def _platform_of(event: AstrMessageEvent) -> str:
+        """取事件真正的平台名。
+
+        ⚠️ 坑：AstrBot 的定时任务是用**合成事件**唤醒 Agent 的，它的
+        ``PlatformMetadata.name`` 被写死成 ``cron``（见 ``core/cron/events.py``），
+        但 ``unified_msg_origin`` 里保留的是**原始会话**（``aiocqhttp:private:xxx``）。
+
+        插件用「平台:用户」当账号 key，如果直接取 ``get_platform_name()``，
+        同一个人在定时任务里会算出 ``cron:1747831170``，而绑定存的是
+        ``aiocqhttp:1747831170`` —— key 对不上，就会误报「尚未绑定 Microsoft 账号」。
+        所以平台名不可信时，从会话字符串里取回真正的平台名。
+        """
+        name = str(event.get_platform_name() or "").strip()
+        if name and name != _CRON_PLATFORM_NAME:
+            return name
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        derived = umo.split(":", 1)[0].strip()
+        return derived or name
+
+    @classmethod
+    def account_id(cls, event: AstrMessageEvent) -> str:
+        """账号标识：按「平台 + 用户」隔离，保证群聊里每人各自一份凭据。
+
+        定时任务创建时会把原始 aid 写进 payload，优先用它（最可靠）；
+        兼容更早创建、payload 里没有 aid 的任务——它们仍能靠会话字符串还原平台名。
+        """
+        getter = getattr(event, "get_extra", None)
+        if callable(getter):
+            payload = getter("cron_payload", None)
+            if isinstance(payload, dict):
+                explicit = str(payload.get("aid") or "").strip()
+                if explicit:
+                    return explicit
+        return f"{cls._platform_of(event)}:{event.get_sender_id()}"
 
     def _check_allowed(self, event: AstrMessageEvent) -> str | None:
         """返回 None 表示允许使用；否则返回拒绝文案。"""
@@ -1197,7 +1232,7 @@ class TodoPlugin(Star):
         for task, task_id in wanted:
             try:
                 job = await self._create_reminder_job(
-                    cron_mgr, task=task, session=plan.session,
+                    cron_mgr, aid=plan.aid, task=task, session=plan.session,
                     sender_id=plan.sender_id, list_name=list_name,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1238,8 +1273,10 @@ class TodoPlugin(Star):
             notes.append("⚠️ " + "；".join(problems[:3]))
         return notes
 
-    async def _create_reminder_job(self, cron_mgr, *, task: TaskDraft, session: str,
-                                   sender_id: str, list_name: str):
+    async def _create_reminder_job(
+        self, cron_mgr, *, aid: str, task: TaskDraft, session: str,
+        sender_id: str, list_name: str,
+    ):
         """调用 AstrBot 内置定时任务创建一个 active_agent 任务。"""
         due_part = ""
         if task.due_date:
@@ -1253,11 +1290,14 @@ class TodoPlugin(Star):
         #   sender_id  -> 用来判定 admin/member 角色
         #   note       -> 唤醒时交给 Agent 的消息
         #   origin     -> "api" 会强制 admin，这里用 "plugin" 走正常判定
+        #   aid        -> 插件自己的账号 key。定时任务合成事件的平台名是 "cron"，
+        #                 带上它才能让到点后的工具调用找到正确的凭据（否则会误报未绑定）
         payload = {
             "session": session,
             "sender_id": str(sender_id or ""),
             "note": note,
             "origin": "plugin",
+            "aid": aid,
         }
         name = f"待办提醒 · {task.title}"[:60]
         timezone_name = self._tz()
