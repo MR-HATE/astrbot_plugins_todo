@@ -3,7 +3,7 @@
 本项目按里程碑开发，每个里程碑都在真机上验收通过后才进入下一个。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## v1.0.2
+## v1.0.3
 - 修复：**定时任务唤起时误报「尚未绑定 Microsoft 账号」**。
   AstrBot 用合成事件（`CronMessageEvent`）唤醒 Agent，其平台名被写死为 `cron`，
   而插件用「平台名:用户ID」当账号 key，于是同一个人的 key 变成 `cron:xxx`，
