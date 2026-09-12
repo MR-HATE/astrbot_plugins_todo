@@ -63,7 +63,7 @@ from .tools import TOOL_CLASSES
 PLUGIN_NAME = "astrbot_plugin_todo"
 
 #: 插件版本，与 metadata.yaml 的 version 保持一致（发版时两处一起改）。
-PLUGIN_VERSION = "v1.0.0"
+PLUGIN_VERSION = "v1.0.2"
 
 #: 出网请求的 User-Agent，便于 Microsoft 侧排查来源。
 USER_AGENT = f"astrbot-plugin-todo/{PLUGIN_VERSION.lstrip('v')}"
